@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const session = request.cookies.get('app_session')?.value;
 
@@ -18,7 +18,7 @@ export function middleware(request: NextRequest) {
   return NextResponse.next();
 }
 
-// 미들웨어 작동 대상 경로 설정
+// 프록시 작동 대상 경로 설정
 export const config = {
   matcher: ['/', '/login']
 };
