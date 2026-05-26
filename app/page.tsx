@@ -396,13 +396,15 @@ export default function Dashboard() {
     const campLatest = campRaw.filter(r => r.date === latestDate);
     const campPrior = campRaw.filter(r => r.date !== latestDate);
 
-    const campPriorSum: { [key: string]: { imp: number; clk: number; cost: number } } = {};
+    const campPriorSum: { [key: string]: { imp: number; clk: number; cost: number; purchaseCcnt: number; purchaseConvAmt: number } } = {};
     campPrior.forEach(row => {
       const cid = row.campaign_id;
-      if (!campPriorSum[cid]) campPriorSum[cid] = { imp: 0, clk: 0, cost: 0 };
+      if (!campPriorSum[cid]) campPriorSum[cid] = { imp: 0, clk: 0, cost: 0, purchaseCcnt: 0, purchaseConvAmt: 0 };
       campPriorSum[cid].imp += row.imp_cnt || 0;
       campPriorSum[cid].clk += row.clk_cnt || 0;
       campPriorSum[cid].cost += row.sales_amt || 0;
+      campPriorSum[cid].purchaseCcnt += row.purchase_ccnt || 0;
+      campPriorSum[cid].purchaseConvAmt += row.purchase_conv_amt || 0;
     });
 
     campLatest.forEach(row => {
@@ -412,10 +414,15 @@ export default function Dashboard() {
 
       const avgImp = prior.imp / priorDaysCount;
       const avgCost = prior.cost / priorDaysCount;
+      const avgPurchaseCcnt = prior.purchaseCcnt / priorDaysCount;
+      const avgRoas = prior.cost > 0 ? (prior.purchaseConvAmt / prior.cost) * 100 : 0;
 
       const curImp = row.imp_cnt || 0;
       const curCost = row.sales_amt || 0;
+      const curPurchaseCcnt = row.purchase_ccnt || 0;
+      const curRoas = curCost > 0 ? (row.purchase_conv_amt / curCost) * 100 : 0;
 
+      // 1. 광고비 변동 감지
       if (avgCost > 1000) {
         const costRatio = curCost / avgCost;
         if (costRatio >= 2.0) {
@@ -437,6 +444,7 @@ export default function Dashboard() {
         }
       }
 
+      // 2. 트래픽(노출수) 변동 감지
       if (avgImp > 100) {
         const impRatio = curImp / avgImp;
         if (impRatio >= 2.5) {
@@ -446,6 +454,58 @@ export default function Dashboard() {
             name: row.campaign_name,
             message: `캠페인 하루 노출수가 평소(일 평균 ${formatNumber(Math.round(avgImp))}회) 대비 **${((impRatio - 1) * 100).toFixed(0)}% 폭증**한 **${formatNumber(curImp)}회**를 기록했습니다!`,
             ratio: impRatio
+          });
+        }
+      }
+
+      // 3. 구매 전환수 급증/급감 감지
+      if (avgPurchaseCcnt > 0.3) {
+        const purchaseRatio = curPurchaseCcnt / avgPurchaseCcnt;
+        if (purchaseRatio >= 2.0) {
+          newAnomalyFeed.push({
+            type: 'SURGE_PURCHASE',
+            level: 'CAMPAIGN',
+            name: row.campaign_name,
+            message: `캠페인 일 구매완료 수가 평소(일 평균 ${avgPurchaseCcnt.toFixed(1)}건) 대비 **${((purchaseRatio - 1) * 100).toFixed(0)}% 폭증**한 **${curPurchaseCcnt}건**을 기록하며 폭발적인 효율을 기록했습니다!`,
+            ratio: purchaseRatio
+          });
+        } else if (purchaseRatio <= 0.2) {
+          newAnomalyFeed.push({
+            type: 'DROP_PURCHASE',
+            level: 'CAMPAIGN',
+            name: row.campaign_name,
+            message: `캠페인 일 구매완료 수가 평소(일 평균 ${avgPurchaseCcnt.toFixed(1)}건) 대비 **${((1 - purchaseRatio) * 100).toFixed(0)}% 급감**한 **${curPurchaseCcnt}건**에 그쳤습니다. 상세 설정이나 상세 페이지 품절 여부를 체크하세요!`,
+            ratio: purchaseRatio
+          });
+        }
+      } else if (avgPurchaseCcnt > 0 && curPurchaseCcnt === 0 && priorDaysCount >= 3) {
+        newAnomalyFeed.push({
+          type: 'ZERO_PURCHASE',
+          level: 'CAMPAIGN',
+          name: row.campaign_name,
+          message: `평소 꾸준히 구매 전환이 일어나던 캠페인이나, 오늘 하루 **구매 완료가 0건**에 그쳤습니다. 전환 링크 작동 여부를 점검해 보세요.`,
+          ratio: 0
+        });
+      }
+
+      // 4. 광고수익률(ROAS) 급증/급감 감지
+      if (avgRoas > 10 && curCost > 1000) {
+        const roasRatio = curRoas / avgRoas;
+        if (roasRatio >= 1.5) {
+          newAnomalyFeed.push({
+            type: 'SURGE_ROAS',
+            level: 'CAMPAIGN',
+            name: row.campaign_name,
+            message: `캠페인 하루 구매 ROAS가 평소(일 평균 ${avgRoas.toFixed(0)}%) 대비 **${((roasRatio - 1) * 100).toFixed(0)}% 급상승**한 **${curRoas.toFixed(0)}%**를 달성하여 광고 효율이 극대화되었습니다!`,
+            ratio: roasRatio
+          });
+        } else if (roasRatio <= 0.3) {
+          newAnomalyFeed.push({
+            type: 'DROP_ROAS',
+            level: 'CAMPAIGN',
+            name: row.campaign_name,
+            message: `캠페인 하루 구매 ROAS가 평소(일 평균 ${avgRoas.toFixed(0)}%) 대비 **${((1 - roasRatio) * 100).toFixed(0)}% 폭락**한 **${curRoas.toFixed(0)}%**에 그쳐 효율 저하 징후를 감지했습니다. 소재 교체 타이밍인지 확인해 보세요.`,
+            ratio: roasRatio
           });
         }
       }
@@ -1750,104 +1810,6 @@ export default function Dashboard() {
               </div>
             )}
           </section>
-        ) : activeTab === 'briefing' && selectedAccountId ? (
-          /* ========================================================
-             ⚡ V3 신규: AI 1차 성과 브리핑 및 이상 징후 피드 화면
-             ======================================================== */
-          <section className="campaigns-section" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-            {/* 비즈머니 충전 경고 카드 */}
-            {bizmoneyBalance !== null && (bizmoneyBalance <= 50000 || (summary.totalCost > 0 && bizmoneyBalance < (summary.totalCost / (campaigns.length > 0 ? expectedDays : 1)) * 2)) && (
-              <div className="glass-panel" style={{
-                background: 'rgba(244, 63, 94, 0.08)',
-                border: '1px solid rgba(244, 63, 94, 0.3)',
-                borderRadius: '16px',
-                padding: '20px 24px',
-                display: 'flex',
-                gap: '16px',
-                alignItems: 'center'
-              }}>
-                <span style={{ fontSize: '2rem' }}>🔴</span>
-                <div>
-                  <h3 style={{ color: '#f43f5e', fontWeight: 700, fontSize: '0.95rem', marginBottom: '4px' }}>비즈머니 잔고 소멸 임박 경보</h3>
-                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: '1.5' }}>
-                    현재 광고 계정의 비즈머니 잔액이 <strong>{formatNumber(bizmoneyBalance)}원</strong> 남았습니다. 
-                    현재 일 평균 소진 광고비(<strong>{formatNumber(Math.round(summary.totalCost / (campaigns.length > 0 ? expectedDays : 1)))}원</strong>) 기준으로 
-                    약 <strong>{Math.max(0, Math.floor(bizmoneyBalance / (summary.totalCost / (campaigns.length > 0 ? expectedDays : 1) || 1)))}일 후</strong> 충전 잔액이 완전히 바닥나 네이버 광고 노출이 일제히 중단될 위기입니다. 지금 바로 비즈머니 충전을 진행해 주세요!
-                  </p>
-                </div>
-              </div>
-            )}
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
-              {/* 1. 최근 1일 이상 징후 분석 피드 */}
-              <div className="glass-panel" style={{ padding: '24px', borderRadius: '16px', border: '1px solid var(--panel-border)' }}>
-                <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--primary-rose)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '12px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  ⚠️ 최근 1일 지표 이상 징후 감지 (Anomaly Feed)
-                </h3>
-                {anomalyFeed.length === 0 ? (
-                  <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                    분석 결과, 최근 1일 동안 일 평균 대비 비정상적으로 급증했거나 급감(소진 멈춤)한 지표 이상 징후가 감지되지 않았습니다. 광고가 안정적으로 소진 중입니다.
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                    {anomalyFeed.map((feed, i) => (
-                      <div key={i} style={{
-                        background: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') ? 'rgba(217, 70, 239, 0.05)' : 'rgba(244, 63, 94, 0.05)',
-                        borderLeft: '4px solid',
-                        borderLeftColor: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') ? 'var(--primary-rose)' : '#f43f5e',
-                        padding: '12px 16px',
-                        borderRadius: '0 8px 8px 0',
-                        fontSize: '0.82rem',
-                        lineHeight: '1.5'
-                      }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                          <span style={{ fontWeight: 700, color: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') ? 'var(--primary-rose)' : '#f43f5e' }}>
-                            {feed.type.startsWith('SURGE') ? '⚡ 예산 급증 감지' : feed.type.startsWith('SPIKE') ? '⚡ 트래픽 급증 감지' : '⚠️ 지표 급감 (소진 위기)'}
-                          </span>
-                          <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', fontWeight: 600 }}>{feed.name}</span>
-                        </div>
-                        <div dangerouslySetInnerHTML={{ __html: feed.message }} style={{ color: 'var(--text-primary)' }}></div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* 2. PoP 기간 성과 변동 피드 */}
-              <div className="glass-panel" style={{ padding: '24px', borderRadius: '16px', border: '1px solid var(--panel-border)' }}>
-                <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--primary-emerald)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '12px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  📈 이전 기간 대비 성과 변동 피드 (PoP)
-                </h3>
-                {popFeed.length === 0 ? (
-                  <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                    ℹ️ 조회 범위 일수가 충분하지 않거나 이전 대비 눈에 띄는 트래픽 변동률(±25% 이상)이 발생한 캠페인이 없습니다.
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                    {popFeed.map((feed, i) => (
-                      <div key={i} style={{
-                        background: feed.type === 'TRAFFIC_GROWTH' ? 'rgba(16, 185, 129, 0.05)' : 'rgba(239, 68, 68, 0.05)',
-                        borderLeft: '4px solid',
-                        borderLeftColor: feed.type === 'TRAFFIC_GROWTH' ? 'var(--primary-emerald)' : '#ef4444',
-                        padding: '12px 16px',
-                        borderRadius: '0 8px 8px 0',
-                        fontSize: '0.82rem',
-                        lineHeight: '1.5'
-                      }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                          <span style={{ fontWeight: 700, color: feed.type === 'TRAFFIC_GROWTH' ? 'var(--primary-emerald)' : '#ef4444' }}>
-                            {feed.type === 'TRAFFIC_GROWTH' ? '🔺 트래픽 활성화' : '🔻 트래픽 하락 추세'}
-                          </span>
-                          <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>{feed.name}</span>
-                        </div>
-                        <div dangerouslySetInnerHTML={{ __html: feed.message }} style={{ color: 'var(--text-primary)' }}></div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          </section>
         ) : selectedAccountId ? (
           /* ========================================================
              일반 성과분석 대시보드 화면
@@ -2003,42 +1965,147 @@ export default function Dashboard() {
                       )}
                     </div>
 
-                    <button
-                      onClick={downloadCSV}
-                      className="btn-premium"
-                      style={{
-                        background: 'linear-gradient(135deg, #10b981, #059669)',
-                        boxShadow: '0 4px 15px rgba(16, 185, 129, 0.25)',
-                        padding: '10px 18px',
-                        fontSize: '0.85rem'
-                      }}
-                    >
-                      📥 엑셀/CSV 다운로드 (구매완료 기준)
-                    </button>
-                  </div>
-
-                  {/* 세부 검색 및 타이틀 */}
-                  <div className="section-header">
-                    <h2 className="section-title">
-                      {activeTab === 'campaign' ? '캠페인별 세부 성과' : activeTab === 'adgroup' ? '광고그룹별 세부 성과' : '소재별 세부 성과'} ({datePreset === 'yesterday' ? '어제 하루' : '해당 기간 합계'})
-                    </h2>
-                    <div className="search-filter-group">
-                      <input
-                        type="text"
-                        placeholder={activeTab === 'campaign' ? "캠페인 이름 검색..." : activeTab === 'adgroup' ? "광고그룹 이름 검색..." : "소재 이름 검색..."}
-                        className="search-input"
-                        value={activeTab === 'campaign' ? campaignSearchTerm : activeTab === 'adgroup' ? adgroupSearchTerm : adSearchTerm}
-                        onChange={(e) => {
-                          if (activeTab === 'campaign') setCampaignSearchTerm(e.target.value);
-                          else if (activeTab === 'adgroup') setAdgroupSearchTerm(e.target.value);
-                          else setAdSearchTerm(e.target.value);
+                    {activeTab !== 'briefing' && (
+                      <button
+                        onClick={downloadCSV}
+                        className="btn-premium"
+                        style={{
+                          background: 'linear-gradient(135deg, #10b981, #059669)',
+                          boxShadow: '0 4px 15px rgba(16, 185, 129, 0.25)',
+                          padding: '10px 18px',
+                          fontSize: '0.85rem'
                         }}
-                      />
-                    </div>
+                      >
+                        📥 엑셀/CSV 다운로드 (구매완료 기준)
+                      </button>
+                    )}
                   </div>
 
-                  {/* 탭 분기 테이블 렌더링 */}
-                  {activeTab === 'campaign' ? (
+                  {activeTab === 'briefing' ? (
+                    /* ⚡ V3 신규: AI 1차 성과 브리핑 및 이상 징후 피드 화면 */
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', marginTop: '20px' }}>
+                      {/* 비즈머니 충전 경고 카드 */}
+                      {bizmoneyBalance !== null && (bizmoneyBalance <= 50000 || (summary.totalCost > 0 && bizmoneyBalance < (summary.totalCost / (campaigns.length > 0 ? expectedDays : 1)) * 2)) && (
+                        <div className="glass-panel" style={{
+                          background: 'rgba(244, 63, 94, 0.08)',
+                          border: '1px solid rgba(244, 63, 94, 0.3)',
+                          borderRadius: '16px',
+                          padding: '20px 24px',
+                          display: 'flex',
+                          gap: '16px',
+                          alignItems: 'center'
+                        }}>
+                          <span style={{ fontSize: '2rem' }}>🔴</span>
+                          <div>
+                            <h3 style={{ color: '#f43f5e', fontWeight: 700, fontSize: '0.95rem', marginBottom: '4px' }}>비즈머니 잔고 소멸 임박 경보</h3>
+                            <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: '1.5' }}>
+                              현재 광고 계정의 비즈머니 잔액이 <strong>{formatNumber(bizmoneyBalance)}원</strong> 남았습니다. 
+                              현재 일 평균 소진 광고비(<strong>{formatNumber(Math.round(summary.totalCost / (campaigns.length > 0 ? expectedDays : 1)))}원</strong>) 기준으로 
+                              약 <strong>{Math.max(0, Math.floor(bizmoneyBalance / (summary.totalCost / (campaigns.length > 0 ? expectedDays : 1) || 1)))}일 후</strong> 충전 잔액이 완전히 바닥나 네이버 광고 노출이 일제히 중단될 위기입니다. 지금 바로 비즈머니 충전을 진행해 주세요!
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+                        {/* 1. 최근 1일 이상 징후 분석 피드 */}
+                        <div className="glass-panel" style={{ padding: '24px', borderRadius: '16px', border: '1px solid var(--panel-border)' }}>
+                          <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--primary-rose)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '12px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            ⚠️ 최근 1일 지표 이상 징후 감지 (Anomaly Feed)
+                          </h3>
+                          {anomalyFeed.length === 0 ? (
+                            <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                              분석 결과, 최근 1일 동안 일 평균 대비 비정상적으로 급증했거나 급감(소진 멈춤)한 지표 이상 징후가 감지되지 않았습니다. 광고가 안정적으로 소진 중입니다.
+                            </div>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                              {anomalyFeed.map((feed, i) => (
+                                <div key={i} style={{
+                                  background: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') || feed.type.startsWith('ZERO') ? 'rgba(217, 70, 239, 0.05)' : 'rgba(244, 63, 94, 0.05)',
+                                  borderLeft: '4px solid',
+                                  borderLeftColor: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') || feed.type.startsWith('ZERO') ? 'var(--primary-rose)' : '#f43f5e',
+                                  padding: '12px 16px',
+                                  borderRadius: '0 8px 8px 0',
+                                  fontSize: '0.82rem',
+                                  lineHeight: '1.5'
+                                }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                                    <span style={{ fontWeight: 700, color: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') || feed.type.startsWith('ZERO') ? 'var(--primary-rose)' : '#f43f5e' }}>
+                                      {feed.type.startsWith('SURGE_COST') ? '⚡ 예산 급증 감지' 
+                                       : feed.type.startsWith('SURGE_PURCHASE') ? '⚡ 구매 전환수 폭발'
+                                       : feed.type.startsWith('SURGE_ROAS') ? '⚡ 광고 수익률(ROAS) 급증'
+                                       : feed.type.startsWith('SPIKE') ? '⚡ 트래픽 급증 감지' 
+                                       : feed.type.startsWith('ZERO_PURCHASE') ? '⚠️ 일일 구매 완료 0건 위기'
+                                       : '⚠️ 지표 급감 (소진 위기)'}
+                                    </span>
+                                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', fontWeight: 600 }}>{feed.name}</span>
+                                  </div>
+                                  <div dangerouslySetInnerHTML={{ __html: feed.message }} style={{ color: 'var(--text-primary)' }}></div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* 2. PoP 기간 성과 변동 피드 */}
+                        <div className="glass-panel" style={{ padding: '24px', borderRadius: '16px', border: '1px solid var(--panel-border)' }}>
+                          <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--primary-emerald)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '12px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            📈 이전 기간 대비 성과 변동 피드 (PoP)
+                          </h3>
+                          {popFeed.length === 0 ? (
+                            <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                              ℹ️ 조회 범위 일수가 충분하지 않거나 이전 대비 눈에 띄는 트래픽 변동률(±25% 이상)이 발생한 캠페인이 없습니다.
+                            </div>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                              {popFeed.map((feed, i) => (
+                                <div key={i} style={{
+                                  background: feed.type === 'TRAFFIC_GROWTH' ? 'rgba(16, 185, 129, 0.05)' : 'rgba(239, 68, 68, 0.05)',
+                                  borderLeft: '4px solid',
+                                  borderLeftColor: feed.type === 'TRAFFIC_GROWTH' ? 'var(--primary-emerald)' : '#ef4444',
+                                  padding: '12px 16px',
+                                  borderRadius: '0 8px 8px 0',
+                                  fontSize: '0.82rem',
+                                  lineHeight: '1.5'
+                                }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                                    <span style={{ fontWeight: 700, color: feed.type === 'TRAFFIC_GROWTH' ? 'var(--primary-emerald)' : '#ef4444' }}>
+                                      {feed.type === 'TRAFFIC_GROWTH' ? '🔺 트래픽 활성화' : '🔻 트래픽 하락 추세'}
+                                    </span>
+                                    <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>{feed.name}</span>
+                                  </div>
+                                  <div dangerouslySetInnerHTML={{ __html: feed.message }} style={{ color: 'var(--text-primary)' }}></div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {/* 세부 검색 및 타이틀 */}
+                      <div className="section-header">
+                        <h2 className="section-title">
+                          {activeTab === 'campaign' ? '캠페인별 세부 성과' : activeTab === 'adgroup' ? '광고그룹별 세부 성과' : '소재별 세부 성과'} ({datePreset === 'yesterday' ? '어제 하루' : '해당 기간 합계'})
+                        </h2>
+                        <div className="search-filter-group">
+                          <input
+                            type="text"
+                            placeholder={activeTab === 'campaign' ? "캠페인 이름 검색..." : activeTab === 'adgroup' ? "광고그룹 이름 검색..." : "소재 이름 검색..."}
+                            className="search-input"
+                            value={activeTab === 'campaign' ? campaignSearchTerm : activeTab === 'adgroup' ? adgroupSearchTerm : adSearchTerm}
+                            onChange={(e) => {
+                              if (activeTab === 'campaign') setCampaignSearchTerm(e.target.value);
+                              else if (activeTab === 'adgroup') setAdgroupSearchTerm(e.target.value);
+                              else setAdSearchTerm(e.target.value);
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* 탭 분기 테이블 렌더링 */}
+                      {activeTab === 'campaign' ? (
                     filteredCampaigns.length === 0 ? (
                       <div className="empty-view glass-panel">
                         <div className="empty-icon">📂</div>
@@ -2415,6 +2482,8 @@ export default function Dashboard() {
                         </table>
                       </div>
                     )
+                  )}
+                  </>
                   )}
                 </section>
               </>
