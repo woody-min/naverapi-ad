@@ -1334,6 +1334,19 @@ export default function Dashboard() {
     if (selectedAccountId) {
       if (datePreset === 'custom' && (!customSince || !customUntil)) return;
       fetchCampaignAndAdGroupStats(selectedAccountId, true);
+
+      // 날짜 일수 계산을 바탕으로 스마트 탭 스위칭 (1일 범위면 'campaign', 2일 이상 범위면 'briefing' 탭 활성화)
+      const { since: sDate, until: uDate } = getKstDateRange(datePreset);
+      const start = new Date(sDate);
+      const end = new Date(uDate);
+      const diffTime = Math.abs(end.getTime() - start.getTime());
+      const days = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+
+      if (days >= 2) {
+        setActiveTab('briefing');
+      } else {
+        setActiveTab('campaign');
+      }
     } else {
       setCampaigns([]);
       setAdgroups([]);
@@ -1529,7 +1542,6 @@ export default function Dashboard() {
                   key={acc.customer_id}
                   className={`account-item ${selectedAccountId === acc.customer_id ? 'active' : ''}`}
                   onClick={() => {
-                    setActiveTab('briefing'); // 계정 선택 시 강제로 AI 브리핑 탭으로 전환
                     setSelectedAccountId(acc.customer_id);
                   }}
                 >
