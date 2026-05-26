@@ -144,8 +144,13 @@ export default function Dashboard() {
   const [campaignMasterNames, setCampaignMasterNames] = useState<Map<string, string>>(new Map());
   const [adgroupMasterNames, setAdgroupMasterNames] = useState<Map<string, string>>(new Map());
   
-  // 탭 제어 상태 ('campaign' | 'adgroup' | 'ad' | 'users')
-  const [activeTab, setActiveTab] = useState<'campaign' | 'adgroup' | 'ad' | 'users'>('campaign');
+  // 탭 제어 상태 ('briefing' | 'campaign' | 'adgroup' | 'ad' | 'users')
+  const [activeTab, setActiveTab] = useState<'briefing' | 'campaign' | 'adgroup' | 'ad' | 'users'>('briefing');
+  const [expectedDays, setExpectedDays] = useState<number>(1);
+  const [bizmoneyBalance, setBizmoneyBalance] = useState<number | null>(null);
+  const [loadingBizmoney, setLoadingBizmoney] = useState<boolean>(false);
+  const [anomalyFeed, setAnomalyFeed] = useState<any[]>([]);
+  const [popFeed, setPopFeed] = useState<any[]>([]);
   
   // 3-tier 아코디언 펼침 ID 세트
   const [expandedCampaignIds, setExpandedCampaignIds] = useState<Set<string>>(new Set());
@@ -329,6 +334,203 @@ export default function Dashboard() {
     } finally {
       setChangingPassword(false);
     }
+  };
+
+  // C-2. 비즈머니 잔액 실시간 조회 함수
+  const fetchBizmoneyBalance = async (customerId: string) => {
+    if (!currentUser || !customerId) return;
+    const filterUserId = currentUser.role === 'ADMIN' ? selectedUserFilter : currentUser.id;
+    if (!filterUserId) return;
+
+    try {
+      setLoadingBizmoney(true);
+      let url = `/api/sync/bizmoney?customerId=${customerId}`;
+      if (currentUser.role === 'ADMIN' && selectedUserFilter) {
+        url += `&targetUserId=${selectedUserFilter}`;
+      }
+
+      const response = await fetch(url);
+      const result = await response.json();
+      if (result.success && result.data) {
+        setBizmoneyBalance(result.data.bizmoney);
+      } else {
+        setBizmoneyBalance(null);
+      }
+    } catch (err) {
+      console.error('Error fetching bizmoney balance:', err);
+      setBizmoneyBalance(null);
+    } finally {
+      setLoadingBizmoney(false);
+    }
+  };
+
+  // C-3. AI 인사이트 및 Anomaly 연산 엔진
+  const runInsightEngine = (
+    campRaw: any[],
+    adgRaw: any[],
+    adRaw: any[],
+    expectedSince: string,
+    expectedUntil: string
+  ) => {
+    if (!campRaw || campRaw.length === 0) {
+      setAnomalyFeed([]);
+      setPopFeed([]);
+      return;
+    }
+
+    const sortedDates = Array.from(new Set(campRaw.map(r => r.date))).sort();
+    if (sortedDates.length < 2) {
+      setAnomalyFeed([]);
+      setPopFeed([]);
+      return;
+    }
+
+    const latestDate = sortedDates[sortedDates.length - 1];
+    const priorDates = sortedDates.slice(0, sortedDates.length - 1);
+    const priorDaysCount = priorDates.length;
+
+    const newAnomalyFeed: any[] = [];
+    const newPopFeed: any[] = [];
+
+    // --- A. 최근 1일 증분 이상 분석 (Latest Daily Increment Anomaly) ---
+    const campLatest = campRaw.filter(r => r.date === latestDate);
+    const campPrior = campRaw.filter(r => r.date !== latestDate);
+
+    const campPriorSum: { [key: string]: { imp: number; clk: number; cost: number } } = {};
+    campPrior.forEach(row => {
+      const cid = row.campaign_id;
+      if (!campPriorSum[cid]) campPriorSum[cid] = { imp: 0, clk: 0, cost: 0 };
+      campPriorSum[cid].imp += row.imp_cnt || 0;
+      campPriorSum[cid].clk += row.clk_cnt || 0;
+      campPriorSum[cid].cost += row.sales_amt || 0;
+    });
+
+    campLatest.forEach(row => {
+      const cid = row.campaign_id;
+      const prior = campPriorSum[cid];
+      if (!prior) return;
+
+      const avgImp = prior.imp / priorDaysCount;
+      const avgCost = prior.cost / priorDaysCount;
+
+      const curImp = row.imp_cnt || 0;
+      const curCost = row.sales_amt || 0;
+
+      if (avgCost > 1000) {
+        const costRatio = curCost / avgCost;
+        if (costRatio >= 2.0) {
+          newAnomalyFeed.push({
+            type: 'SURGE_COST',
+            level: 'CAMPAIGN',
+            name: row.campaign_name,
+            message: `캠페인 일 광고비가 평소(일 평균 ${formatNumber(Math.round(avgCost))}원) 대비 **${((costRatio - 1) * 100).toFixed(0)}% 폭증**한 **${formatNumber(curCost)}원** 소진되어 예산 과소진 징후를 감지했습니다.`,
+            ratio: costRatio
+          });
+        } else if (curCost <= avgCost * 0.15 && row.campaign_status === 'ELIGIBLE') {
+          newAnomalyFeed.push({
+            type: 'DROP_COST',
+            level: 'CAMPAIGN',
+            name: row.campaign_name,
+            message: `캠페인 일 광고비가 평소(일 평균 ${formatNumber(Math.round(avgCost))}원) 대비 **${((1 - costRatio) * 100).toFixed(0)}% 급감**한 **${formatNumber(curCost)}원** 소진에 그쳤습니다. (ON 상태이나 소진 멈춤 감지)`,
+            ratio: costRatio
+          });
+        }
+      }
+
+      if (avgImp > 100) {
+        const impRatio = curImp / avgImp;
+        if (impRatio >= 2.5) {
+          newAnomalyFeed.push({
+            type: 'SPIKE_TRAFFIC',
+            level: 'CAMPAIGN',
+            name: row.campaign_name,
+            message: `캠페인 하루 노출수가 평소(일 평균 ${formatNumber(Math.round(avgImp))}회) 대비 **${((impRatio - 1) * 100).toFixed(0)}% 폭증**한 **${formatNumber(curImp)}회**를 기록했습니다!`,
+            ratio: impRatio
+          });
+        }
+      }
+    });
+
+    const adgLatest = adgRaw.filter(r => r.date === latestDate);
+    const adgPrior = adgRaw.filter(r => r.date !== latestDate);
+
+    const adgPriorSum: { [key: string]: { imp: number; clk: number; cost: number } } = {};
+    adgPrior.forEach(row => {
+      const gid = row.adgroup_id;
+      if (!adgPriorSum[gid]) adgPriorSum[gid] = { imp: 0, clk: 0, cost: 0 };
+      adgPriorSum[gid].imp += row.imp_cnt || 0;
+      adgPriorSum[gid].clk += row.clk_cnt || 0;
+      adgPriorSum[gid].cost += row.sales_amt || 0;
+    });
+
+    adgLatest.forEach(row => {
+      const gid = row.adgroup_id;
+      const prior = adgPriorSum[gid];
+      if (!prior) return;
+
+      const avgCost = prior.cost / priorDaysCount;
+      const curCost = row.sales_amt || 0;
+
+      if (avgCost > 3000 && curCost <= avgCost * 0.05 && row.adgroup_status === 'ELIGIBLE') {
+        newAnomalyFeed.push({
+          type: 'DROP_COST_ADGROUP',
+          level: 'ADGROUP',
+          name: row.adgroup_name,
+          message: `광고그룹 일 소진액이 평소 일 평균(${formatNumber(Math.round(avgCost))}원) 대비 **95% 이상 급감**한 **${formatNumber(curCost)}원** 소진되었습니다. 광고 세팅 노출제한 여부나 링크 품절을 긴급 체크하세요!`,
+          ratio: curCost / avgCost
+        });
+      }
+    });
+
+    // --- B. 직전 기간 대비 변동(Period over Period) 분석 피드 ---
+    const campGrouped: { [key: string]: { imp: number; clk: number; cost: number; name: string } } = {};
+    campPrior.forEach(row => {
+      const cid = row.campaign_id;
+      if (!campGrouped[cid]) campGrouped[cid] = { imp: 0, clk: 0, cost: 0, name: row.campaign_name };
+      campGrouped[cid].imp += row.imp_cnt || 0;
+      campGrouped[cid].clk += row.clk_cnt || 0;
+      campGrouped[cid].cost += row.sales_amt || 0;
+    });
+
+    const latestAggregated: { [key: string]: { imp: number; clk: number; cost: number; name: string } } = {};
+    campLatest.forEach(row => {
+      const cid = row.campaign_id;
+      if (!latestAggregated[cid]) latestAggregated[cid] = { imp: 0, clk: 0, cost: 0, name: row.campaign_name };
+      latestAggregated[cid].imp += row.imp_cnt || 0;
+      latestAggregated[cid].clk += row.clk_cnt || 0;
+      latestAggregated[cid].cost += row.sales_amt || 0;
+    });
+
+    Object.keys(latestAggregated).forEach(cid => {
+      const cur = latestAggregated[cid];
+      const prev = campGrouped[cid];
+      if (!prev) return;
+
+      const prevAvgImp = prev.imp / priorDaysCount;
+      const curImp = cur.imp;
+
+      if (prevAvgImp > 50) {
+        const changeRatio = (curImp - prevAvgImp) / prevAvgImp;
+        if (changeRatio >= 0.25) {
+          newPopFeed.push({
+            type: 'TRAFFIC_GROWTH',
+            name: cur.name,
+            message: `노출 트래픽이 이전 일 평균 대비 **${(changeRatio * 100).toFixed(0)}% 급상승**하여 활성화 중입니다!`,
+            ratio: changeRatio
+          });
+        } else if (changeRatio <= -0.25) {
+          newPopFeed.push({
+            type: 'TRAFFIC_DECLINE',
+            name: cur.name,
+            message: `노출 트래픽이 이전 일 평균 대비 **${(Math.abs(changeRatio) * 100).toFixed(0)}% 하락**하여 침체 구간에 진입했습니다.`,
+            ratio: changeRatio
+          });
+        }
+      }
+    });
+
+    setAnomalyFeed(newAnomalyFeed.slice(0, 5));
+    setPopFeed(newPopFeed.slice(0, 5));
   };
 
   // D. (ADMIN 전용) 신규/기존 유저 목록 조회
@@ -605,19 +807,22 @@ export default function Dashboard() {
       const startDate = new Date(since);
       const endDate = new Date(until);
       const diffTime = Math.abs(endDate.getTime() - startDate.getTime());
-      const expectedDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+      const expectedDaysVal = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+      setExpectedDays(expectedDaysVal);
 
       // DB에 현재 존재하는 고유 날짜 수 계산
       const distinctDatesInDb = new Set(campData.map(row => row.date)).size;
 
       // DB에 이 기간의 데이터가 아예 존재하지 않거나 불완전하게 적재된 경우 네이버 API 동기화 가동
-      if ((campData.length === 0 || adgData.length === 0 || distinctDatesInDb < expectedDays) && forceSyncIfEmpty) {
-        console.log(`[Dashboard] DB 내 해당 기간(${since} ~ ${until})의 데이터가 불완전함 (가져온 날짜 수: ${distinctDatesInDb}/${expectedDays}일). 실시간 동기화...`);
+      if ((campData.length === 0 || adgData.length === 0 || distinctDatesInDb < expectedDaysVal) && forceSyncIfEmpty) {
+        console.log(`[Dashboard] DB 내 해당 기간(${since} ~ ${until})의 데이터가 불완전함 (가져온 날짜 수: ${distinctDatesInDb}/${expectedDaysVal}일). 실시간 동기화...`);
         await handleSyncCampaigns(customerId);
       } else {
         aggregateAndSetCampaigns(campData);
         aggregateAndSetAdgroups(adgData);
         aggregateAndSetAds(adData);
+        // AI 성능 변동 및 이상 징후 감지 엔진 실시간 구동
+        runInsightEngine(campData, adgData, adData, since, until);
       }
     } catch (err: any) {
       console.error('Error fetching campaign & adgroup & ad stats:', err.message);
@@ -1060,6 +1265,7 @@ export default function Dashboard() {
       setCampaigns([]);
       setAdgroups([]);
       setAds([]);
+      setBizmoneyBalance(null);
     }
   }, [currentUser, selectedUserFilter]);
 
@@ -1077,13 +1283,15 @@ export default function Dashboard() {
     setExpandedAdgroupIds(new Set());
   }, [selectedAccountId, datePreset, customSince, customUntil]);
 
-  // 선택된 계정이 바뀔 때만 마스터 이름 캐시 로드
+  // 선택된 계정이 바뀔 때만 마스터 이름 캐시 및 실시간 비즈머니 로드
   useEffect(() => {
     if (selectedAccountId) {
       fetchMasterNames(selectedAccountId);
+      fetchBizmoneyBalance(selectedAccountId);
     } else {
       setCampaignMasterNames(new Map());
       setAdgroupMasterNames(new Map());
+      setBizmoneyBalance(null);
     }
   }, [selectedAccountId]);
 
@@ -1261,7 +1469,7 @@ export default function Dashboard() {
                   key={acc.customer_id}
                   className={`account-item ${selectedAccountId === acc.customer_id ? 'active' : ''}`}
                   onClick={() => {
-                    setActiveTab('campaign'); // 계정 선택 시 강제로 분석 탭으로 복귀
+                    setActiveTab('briefing'); // 계정 선택 시 강제로 AI 브리핑 탭으로 전환
                     setSelectedAccountId(acc.customer_id);
                   }}
                 >
@@ -1310,11 +1518,36 @@ export default function Dashboard() {
         {/* 헤더 */}
         <header className="dashboard-header">
           <div className="title-group">
-            <h1 className="dashboard-title">
+            <h1 className="dashboard-title" style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
               {activeTab === 'users' 
                 ? '⚙️ 대시보드 사용자 계정 관리 (ADMIN)' 
                 : activeAccount 
-                  ? `${activeAccount.ad_account_name} 성과분석` 
+                  ? (
+                    <>
+                      <span>{activeAccount.ad_account_name} 성과분석</span>
+                      {bizmoneyBalance !== null && (
+                        <span style={{
+                          fontSize: '0.8rem',
+                          background: 'rgba(6, 182, 212, 0.15)',
+                          border: '1px solid rgba(6, 182, 212, 0.4)',
+                          color: 'var(--primary-cyan)',
+                          padding: '4px 12px',
+                          borderRadius: '20px',
+                          fontWeight: 700,
+                          boxShadow: '0 0 10px rgba(6, 182, 212, 0.2)',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          marginLeft: '8px'
+                        }}>
+                          💰 비즈머니 잔액: {formatNumber(bizmoneyBalance)}원
+                        </span>
+                      )}
+                      {loadingBizmoney && (
+                        <div className="spinner" style={{ width: '12px', height: '12px', borderTopColor: 'var(--primary-cyan)' }}></div>
+                      )}
+                    </>
+                  ) 
                   : '네이버 검색광고 대시보드'}
             </h1>
             <p className="dashboard-subtitle">
@@ -1418,7 +1651,7 @@ export default function Dashboard() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--panel-border)', paddingBottom: '12px' }}>
               <div style={{ display: 'flex', gap: '8px' }}>
                 <button
-                  onClick={() => { setActiveTab('campaign'); }}
+                  onClick={() => { setActiveTab('briefing'); }}
                   style={{
                     background: 'transparent',
                     border: '1px solid var(--panel-border)',
@@ -1430,7 +1663,7 @@ export default function Dashboard() {
                     cursor: 'pointer'
                   }}
                 >
-                  📂 성과 대시보드로 돌아가기
+                  📂 AI 성과 브리핑으로 돌아가기
                 </button>
               </div>
 
@@ -1517,6 +1750,104 @@ export default function Dashboard() {
               </div>
             )}
           </section>
+        ) : activeTab === 'briefing' && selectedAccountId ? (
+          /* ========================================================
+             ⚡ V3 신규: AI 1차 성과 브리핑 및 이상 징후 피드 화면
+             ======================================================== */
+          <section className="campaigns-section" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            {/* 비즈머니 충전 경고 카드 */}
+            {bizmoneyBalance !== null && (bizmoneyBalance <= 50000 || (summary.totalCost > 0 && bizmoneyBalance < (summary.totalCost / (campaigns.length > 0 ? expectedDays : 1)) * 2)) && (
+              <div className="glass-panel" style={{
+                background: 'rgba(244, 63, 94, 0.08)',
+                border: '1px solid rgba(244, 63, 94, 0.3)',
+                borderRadius: '16px',
+                padding: '20px 24px',
+                display: 'flex',
+                gap: '16px',
+                alignItems: 'center'
+              }}>
+                <span style={{ fontSize: '2rem' }}>🔴</span>
+                <div>
+                  <h3 style={{ color: '#f43f5e', fontWeight: 700, fontSize: '0.95rem', marginBottom: '4px' }}>비즈머니 잔고 소멸 임박 경보</h3>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: '1.5' }}>
+                    현재 광고 계정의 비즈머니 잔액이 <strong>{formatNumber(bizmoneyBalance)}원</strong> 남았습니다. 
+                    현재 일 평균 소진 광고비(<strong>{formatNumber(Math.round(summary.totalCost / (campaigns.length > 0 ? expectedDays : 1)))}원</strong>) 기준으로 
+                    약 <strong>{Math.max(0, Math.floor(bizmoneyBalance / (summary.totalCost / (campaigns.length > 0 ? expectedDays : 1) || 1)))}일 후</strong> 충전 잔액이 완전히 바닥나 네이버 광고 노출이 일제히 중단될 위기입니다. 지금 바로 비즈머니 충전을 진행해 주세요!
+                  </p>
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+              {/* 1. 최근 1일 이상 징후 분석 피드 */}
+              <div className="glass-panel" style={{ padding: '24px', borderRadius: '16px', border: '1px solid var(--panel-border)' }}>
+                <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--primary-rose)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '12px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  ⚠️ 최근 1일 지표 이상 징후 감지 (Anomaly Feed)
+                </h3>
+                {anomalyFeed.length === 0 ? (
+                  <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                    분석 결과, 최근 1일 동안 일 평균 대비 비정상적으로 급증했거나 급감(소진 멈춤)한 지표 이상 징후가 감지되지 않았습니다. 광고가 안정적으로 소진 중입니다.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    {anomalyFeed.map((feed, i) => (
+                      <div key={i} style={{
+                        background: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') ? 'rgba(217, 70, 239, 0.05)' : 'rgba(244, 63, 94, 0.05)',
+                        borderLeft: '4px solid',
+                        borderLeftColor: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') ? 'var(--primary-rose)' : '#f43f5e',
+                        padding: '12px 16px',
+                        borderRadius: '0 8px 8px 0',
+                        fontSize: '0.82rem',
+                        lineHeight: '1.5'
+                      }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <span style={{ fontWeight: 700, color: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') ? 'var(--primary-rose)' : '#f43f5e' }}>
+                            {feed.type.startsWith('SURGE') ? '⚡ 예산 급증 감지' : feed.type.startsWith('SPIKE') ? '⚡ 트래픽 급증 감지' : '⚠️ 지표 급감 (소진 위기)'}
+                          </span>
+                          <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', fontWeight: 600 }}>{feed.name}</span>
+                        </div>
+                        <div dangerouslySetInnerHTML={{ __html: feed.message }} style={{ color: 'var(--text-primary)' }}></div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* 2. PoP 기간 성과 변동 피드 */}
+              <div className="glass-panel" style={{ padding: '24px', borderRadius: '16px', border: '1px solid var(--panel-border)' }}>
+                <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--primary-emerald)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '12px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  📈 이전 기간 대비 성과 변동 피드 (PoP)
+                </h3>
+                {popFeed.length === 0 ? (
+                  <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                    ℹ️ 조회 범위 일수가 충분하지 않거나 이전 대비 눈에 띄는 트래픽 변동률(±25% 이상)이 발생한 캠페인이 없습니다.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    {popFeed.map((feed, i) => (
+                      <div key={i} style={{
+                        background: feed.type === 'TRAFFIC_GROWTH' ? 'rgba(16, 185, 129, 0.05)' : 'rgba(239, 68, 68, 0.05)',
+                        borderLeft: '4px solid',
+                        borderLeftColor: feed.type === 'TRAFFIC_GROWTH' ? 'var(--primary-emerald)' : '#ef4444',
+                        padding: '12px 16px',
+                        borderRadius: '0 8px 8px 0',
+                        fontSize: '0.82rem',
+                        lineHeight: '1.5'
+                      }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <span style={{ fontWeight: 700, color: feed.type === 'TRAFFIC_GROWTH' ? 'var(--primary-emerald)' : '#ef4444' }}>
+                            {feed.type === 'TRAFFIC_GROWTH' ? '🔺 트래픽 활성화' : '🔻 트래픽 하락 추세'}
+                          </span>
+                          <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>{feed.name}</span>
+                        </div>
+                        <div dangerouslySetInnerHTML={{ __html: feed.message }} style={{ color: 'var(--text-primary)' }}></div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
         ) : selectedAccountId ? (
           /* ========================================================
              일반 성과분석 대시보드 화면
@@ -1575,7 +1906,27 @@ export default function Dashboard() {
                 <section className="campaigns-section">
                   {/* 탭 인터페이스 & 어드민 유저관리 탭 및 CSV 다운로드 버튼 헤더 영역 */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--panel-border)', paddingBottom: '12px' }}>
-                    <div style={{ display: 'flex', gap: '8px' }}>
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      {selectedAccountId && (
+                        <button
+                          onClick={() => { setActiveTab('briefing'); }}
+                          style={{
+                            background: activeTab === 'briefing' ? 'rgba(6, 182, 212, 0.15)' : 'transparent',
+                            border: '1px solid',
+                            borderColor: activeTab === 'briefing' ? 'var(--primary-cyan)' : 'var(--panel-border)',
+                            color: activeTab === 'briefing' ? 'var(--text-primary)' : 'var(--text-secondary)',
+                            padding: '10px 20px',
+                            borderRadius: '12px',
+                            fontWeight: '700',
+                            fontSize: '0.85rem',
+                            cursor: 'pointer',
+                            boxShadow: activeTab === 'briefing' ? '0 0 10px rgba(6, 182, 212, 0.2)' : 'none',
+                            transition: 'var(--transition-smooth)'
+                          }}
+                        >
+                          ⚡ AI 성과 브리핑 & 이상 징후 (1차 브리핑)
+                        </button>
+                      )}
                       <button
                         onClick={() => { setActiveTab('campaign'); setSortKey('sales_amt'); }}
                         style={{
