@@ -1,49 +1,497 @@
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
-html {
-  height: 100%;
-}
-
-html,
-body {
-  max-width: 100vw;
-  overflow-x: hidden;
-}
-
-body {
-  min-height: 100%;
-  display: flex;
-  flex-direction: column;
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  --background-color: #0b0f19;
+  --panel-background: rgba(30, 41, 59, 0.45);
+  --panel-border: rgba(255, 255, 255, 0.08);
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  
+  --primary-cyan: #06b6d4;
+  --primary-blue: #3b82f6;
+  --primary-emerald: #10b981;
+  --primary-rose: #f43f5e;
+  --primary-amber: #f59e0b;
+  
+  --glass-glow: rgba(6, 182, 212, 0.15);
+  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 * {
   box-sizing: border-box;
-  padding: 0;
   margin: 0;
+  padding: 0;
 }
 
-a {
-  color: inherit;
-  text-decoration: none;
+body {
+  background-color: var(--background-color);
+  color: var(--text-primary);
+  font-family: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  min-height: 100vh;
+  overflow-x: hidden;
 }
 
-@media (prefers-color-scheme: dark) {
-  html {
-    color-scheme: dark;
-  }
+/* 프리미엄 글래스모피즘 컨테이너 */
+.glass-panel {
+  background: var(--panel-background);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--panel-border);
+  border-radius: 16px;
+  box-shadow: var(--glass-shadow);
+  transition: var(--transition-smooth);
+}
+
+.glass-panel:hover {
+  border-color: rgba(6, 182, 212, 0.25);
+  box-shadow: 0 8px 32px 0 rgba(6, 182, 212, 0.1);
+}
+
+/* 대시보드 그리드 레이아웃 */
+.dashboard-container {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  min-height: 100vh;
+}
+
+/* 사이드바 */
+.sidebar {
+  border-right: 1px solid var(--panel-border);
+  background: rgba(15, 23, 42, 0.6);
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: 100vh;
+  position: sticky;
+  top: 0;
+}
+
+.logo-section {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 32px;
+  padding: 0 8px;
+}
+
+.logo-icon {
+  width: 32px;
+  height: 32px;
+  background: linear-gradient(135deg, var(--primary-cyan), var(--primary-blue));
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  color: white;
+  box-shadow: 0 0 15px var(--glass-glow);
+}
+
+.logo-text {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  background: linear-gradient(to right, #ffffff, #94a3b8);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.menu-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  letter-spacing: 0.05em;
+  margin-bottom: 12px;
+  padding: 0 8px;
+}
+
+.accounts-list {
+  flex-grow: 1;
+  overflow-y: auto;
+  margin-bottom: 24px;
+}
+
+.accounts-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.accounts-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+}
+
+.account-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: var(--transition-smooth);
+  margin-bottom: 6px;
+  border: 1px solid transparent;
+}
+
+.account-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.account-item.active {
+  background: rgba(6, 182, 212, 0.08);
+  border-color: rgba(6, 182, 212, 0.3);
+}
+
+.account-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.account-id {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.account-sync-time {
+  font-size: 0.65rem;
+  color: rgba(148, 163, 184, 0.6);
+  margin-top: 4px;
+}
+
+/* 프리미엄 버튼 */
+.btn-premium {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: linear-gradient(135deg, var(--primary-cyan), var(--primary-blue));
+  border: none;
+  color: white;
+  padding: 12px 20px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: var(--transition-smooth);
+  box-shadow: 0 4px 15px rgba(6, 182, 212, 0.25);
+}
+
+.btn-premium:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(6, 182, 212, 0.4);
+}
+
+.btn-premium:active {
+  transform: translateY(0);
+}
+
+.btn-premium:disabled {
+  background: #334155;
+  color: var(--text-secondary);
+  box-shadow: none;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* 메인 영역 */
+.main-content {
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+/* 헤더 */
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dashboard-title {
+  font-size: 1.75rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  background: linear-gradient(to right, #ffffff, #cbd5e1);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.dashboard-subtitle {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.date-badge {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--panel-border);
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--primary-cyan);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 종합 지표 카드 그리드 */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 20px;
+}
+
+.stat-card {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: relative;
+  overflow: hidden;
+}
+
+.stat-card::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4px;
+  height: 100%;
+  background: linear-gradient(to bottom, var(--primary-cyan), var(--primary-blue));
+  border-radius: 4px 0 0 4px;
+}
+
+.stat-card.emerald::after {
+  background: var(--primary-emerald);
+}
+.stat-card.rose::after {
+  background: var(--primary-rose);
+}
+.stat-card.amber::after {
+  background: var(--primary-amber);
+}
+
+.stat-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.stat-value {
+  font-size: 1.8rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.stat-detail {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stat-detail strong {
+  color: var(--text-primary);
+}
+
+/* 캠페인 디테일 섹션 */
+.campaigns-section {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.section-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.search-filter-group {
+  display: flex;
+  gap: 12px;
+}
+
+.search-input {
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px solid var(--panel-border);
+  padding: 10px 16px;
+  border-radius: 10px;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  outline: none;
+  transition: var(--transition-smooth);
+  width: 240px;
+}
+
+.search-input:focus {
+  border-color: var(--primary-cyan);
+  box-shadow: 0 0 10px var(--glass-glow);
+}
+
+/* 테이블 컨테이너 및 디자인 */
+.table-container {
+  overflow-x: auto;
+  border-radius: 16px;
+  border: 1px solid var(--panel-border);
+  background: rgba(15, 23, 42, 0.3);
+  box-shadow: var(--glass-shadow);
+}
+
+.premium-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 0.85rem;
+}
+
+.premium-table th {
+  background: rgba(15, 23, 42, 0.7);
+  padding: 16px 20px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--panel-border);
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  user-select: none;
+  transition: var(--transition-smooth);
+}
+
+.premium-table th:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.premium-table td {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--panel-border);
+  color: var(--text-primary);
+  transition: var(--transition-smooth);
+}
+
+.premium-table tr:last-child td {
+  border-bottom: none;
+}
+
+.premium-table tr:hover td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* 상태 뱃지 */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.badge.eligible {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--primary-emerald);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.badge.paused {
+  background: rgba(244, 63, 94, 0.12);
+  color: var(--primary-rose);
+  border: 1px solid rgba(244, 63, 94, 0.2);
+}
+
+/* 정렬 화살표 */
+.sort-arrow {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 0.65rem;
+}
+
+/* 로딩 애니메이션 스피너 */
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 3px solid rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  border-top-color: white;
+  animation: spin 1s ease-in-out infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 전역 로딩/비어있는 레이아웃 */
+.loading-view, .empty-view {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 80px 24px;
+  gap: 16px;
+  text-align: center;
+}
+
+.loading-text, .empty-text {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+
+.empty-icon {
+  font-size: 3rem;
+  color: var(--text-secondary);
+  opacity: 0.5;
+}
+
+/* 프리미엄 데이트 피커 */
+.date-picker-input {
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--panel-border);
+  padding: 8px 12px;
+  border-radius: 10px;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-weight: 500;
+  outline: none;
+  cursor: pointer;
+  transition: var(--transition-smooth);
+}
+
+.date-picker-input:focus {
+  border-color: var(--primary-cyan);
+  box-shadow: 0 0 10px var(--glass-glow);
+}
+
+/* 크롬/사파리 달력 아이콘 스타일링 */
+.date-picker-input::-webkit-calendar-picker-indicator {
+  filter: invert(1) brightness(0.8);
+  cursor: pointer;
+  transition: var(--transition-smooth);
+}
+
+.date-picker-input::-webkit-calendar-picker-indicator:hover {
+  filter: invert(1) brightness(1);
 }
