@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, Fragment } from 'react';
+import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 
 interface AdvertiserAccount {
@@ -82,23 +83,69 @@ interface AdStat {
   purchase_ror: number;
 }
 
+// 사용자 정보 인터페이스
+interface DashboardUser {
+  id: string;
+  user_name: string;
+  login_id: string;
+  role: string;
+  naver_api_key?: string;
+  naver_secret_key?: string;
+  naver_customer_id?: string;
+  created_at: string;
+}
+
 type DatePreset = 'yesterday' | 'last7days' | 'last30days' | 'lastweek' | 'lastmonth' | 'custom';
 type SortKey = 'campaign_name' | 'adgroup_name' | 'ad_name' | 'imp_cnt' | 'clk_cnt' | 'ctr' | 'cpc' | 'sales_amt' | 'ccnt' | 'conv_amt' | 'ror';
 type SortOrder = 'asc' | 'desc';
 
 export default function Dashboard() {
+  const router = useRouter();
+
+  // 1. 사용자 세션 및 권한 관련 상태
+  const [currentUser, setCurrentUser] = useState<DashboardUser | null>(null);
+  const [loadingUser, setLoadingUser] = useState<boolean>(true);
+  const [selectedUserFilter, setSelectedUserFilter] = useState<string>(''); // ADMIN 전용: 특정 유저 필터링
+  const [usersList, setUsersList] = useState<DashboardUser[]>([]); // ADMIN 전용: 전체 유저 목록
+  const [loadingUsersList, setLoadingUsersList] = useState<boolean>(false);
+
+  // 비밀번호 변경 모달 상태
+  const [showPasswordModal, setShowPasswordModal] = useState<boolean>(false);
+  const [editProfileName, setEditProfileName] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordError, setPasswordError] = useState('');
+  const [passwordSuccess, setPasswordSuccess] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
+
+  // 사용자 계정 등록/수정 모달 상태 (ADMIN 전용)
+  const [showUserModal, setShowUserModal] = useState<boolean>(false);
+  const [modalUserTitle, setModalUserTitle] = useState('신규 사용자 등록');
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [formUserName, setFormUserName] = useState('');
+  const [formLoginId, setFormLoginId] = useState('');
+  const [formNaverApiKey, setFormNaverApiKey] = useState('');
+  const [formNaverSecretKey, setFormNaverSecretKey] = useState('');
+  const [formNaverCustomerId, setFormNaverCustomerId] = useState('');
+  const [formRole, setFormRole] = useState('USER');
+  const [formPassword, setFormPassword] = useState(''); // 비밀번호 강제 초기화용 (선택)
+  const [userModalError, setUserModalError] = useState('');
+  const [savingUser, setSavingUser] = useState(false);
+
+  // 2. 기존 대시보드 상태 관리
   const [accounts, setAccounts] = useState<AdvertiserAccount[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [campaigns, setCampaigns] = useState<CampaignStat[]>([]);
   const [adgroups, setAdgroups] = useState<AdGroupStat[]>([]);
   const [ads, setAds] = useState<AdStat[]>([]);
   
-  // 마스터 이름 캐시 맵 (날짜 무관 백업 조회용)
+  // 마스터 이름 캐시 맵
   const [campaignMasterNames, setCampaignMasterNames] = useState<Map<string, string>>(new Map());
   const [adgroupMasterNames, setAdgroupMasterNames] = useState<Map<string, string>>(new Map());
   
-  // 탭 제어 상태 ('campaign' | 'adgroup' | 'ad')
-  const [activeTab, setActiveTab] = useState<'campaign' | 'adgroup' | 'ad'>('campaign');
+  // 탭 제어 상태 ('campaign' | 'adgroup' | 'ad' | 'users')
+  const [activeTab, setActiveTab] = useState<'campaign' | 'adgroup' | 'ad' | 'users'>('campaign');
   
   // 3-tier 아코디언 펼침 ID 세트
   const [expandedCampaignIds, setExpandedCampaignIds] = useState<Set<string>>(new Set());
@@ -188,14 +235,238 @@ export default function Dashboard() {
 
   const { since, until } = getKstDateRange(datePreset);
 
-  // 1. 광고주 계정 목록 조회 (Supabase)
+  // A. 로그인 세션 조회
+  const fetchCurrentUser = async () => {
+    try {
+      setLoadingUser(true);
+      const response = await fetch('/api/auth/me');
+      if (!response.ok) {
+        // 인증 실패 시 로그인 페이지로 유도
+        router.push('/login');
+        return;
+      }
+      const result = await response.json();
+      if (result.success && result.user) {
+        setCurrentUser(result.user);
+        setSelectedUserFilter(result.user.id); // 초기 필터는 본인 계정 ID로 설정
+      } else {
+        router.push('/login');
+      }
+    } catch (err) {
+      console.error('Error fetching current user:', err);
+      router.push('/login');
+    } finally {
+      setLoadingUser(false);
+    }
+  };
+
+  // B. 로그아웃 수행
+  const handleLogout = async () => {
+    if (!confirm('로그아웃 하시겠습니까?')) return;
+    try {
+      const response = await fetch('/api/auth/logout', { method: 'POST' });
+      if (response.ok) {
+        router.push('/login');
+      }
+    } catch (err) {
+      alert('로그아웃 처리 중 오류가 발생했습니다.');
+    }
+  };
+
+  // C. 개인 정보 및 비밀번호 변경 수행
+  const handleChangeProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editProfileName.trim()) {
+      setPasswordError('이름을 입력해 주세요.');
+      return;
+    }
+
+    const hasNewPw = newPassword.length > 0;
+    if (hasNewPw) {
+      if (newPassword !== confirmPassword) {
+        setPasswordError('새 비밀번호와 비밀번호 확인이 일치하지 않습니다.');
+        return;
+      }
+      if (newPassword.length < 4) {
+        setPasswordError('새 비밀번호는 최소 4자리 이상이어야 합니다.');
+        return;
+      }
+    }
+
+    try {
+      setPasswordError('');
+      setPasswordSuccess('');
+      setChangingPassword(true);
+
+      const response = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userName: editProfileName,
+          currentPassword,
+          newPassword: hasNewPw ? newPassword : ''
+        })
+      });
+
+      const result = await response.json();
+      if (result.success) {
+        setPasswordSuccess('개인 정보가 성공적으로 변경되었습니다!');
+        if (result.user) {
+          setCurrentUser(result.user);
+        }
+        setCurrentPassword('');
+        setNewPassword('');
+        setConfirmPassword('');
+        setTimeout(() => {
+          setShowPasswordModal(false);
+          setPasswordSuccess('');
+        }, 1500);
+      } else {
+        setPasswordError(result.error || '개인 정보 변경에 실패했습니다.');
+      }
+    } catch (err) {
+      setPasswordError('개인 정보 변경 처리 중 서버 오류가 발생했습니다.');
+    } finally {
+      setChangingPassword(false);
+    }
+  };
+
+  // D. (ADMIN 전용) 신규/기존 유저 목록 조회
+  const fetchUsersList = async () => {
+    if (currentUser?.role !== 'ADMIN') return;
+    try {
+      setLoadingUsersList(true);
+      const response = await fetch('/api/admin/users');
+      const result = await response.json();
+      if (result.success) {
+        setUsersList(result.users || []);
+      }
+    } catch (err: any) {
+      console.error('Error loading users list:', err.message);
+    } finally {
+      setLoadingUsersList(false);
+    }
+  };
+
+  // E. (ADMIN 전용) 신규 사용자 생성 또는 수정
+  const handleSaveUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formUserName.trim() || !formLoginId.trim() || !formNaverApiKey.trim() || !formNaverSecretKey.trim() || !formNaverCustomerId.trim()) {
+      setUserModalError('모든 필수 입력 값을 기입해 주세요.');
+      return;
+    }
+
+    try {
+      setUserModalError('');
+      setSavingUser(true);
+
+      const isEdit = !!editingUserId;
+      const url = isEdit ? `/api/admin/users/${editingUserId}` : '/api/admin/users';
+      const method = isEdit ? 'PUT' : 'POST';
+
+      const payload: any = {
+        userName: formUserName,
+        loginId: formLoginId,
+        naverApiKey: formNaverApiKey,
+        naverSecretKey: formNaverSecretKey,
+        naverCustomerId: formNaverCustomerId,
+        role: formRole
+      };
+
+      if (isEdit && formPassword.trim().length > 0) {
+        payload.password = formPassword; // 비밀번호 강제 초기화
+      }
+
+      const response = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const result = await response.json();
+      if (result.success) {
+        alert(result.message);
+        setShowUserModal(false);
+        fetchUsersList();
+      } else {
+        setUserModalError(result.error || '사용자 저장에 실패했습니다.');
+      }
+    } catch (err: any) {
+      setUserModalError('저장 중 서버 통신 에러가 발생했습니다.');
+    } finally {
+      setSavingUser(false);
+    }
+  };
+
+  // F. (ADMIN 전용) 사용자 삭제
+  const handleDeleteUser = async (user: DashboardUser) => {
+    if (!confirm(`사용자 '${user.user_name}' 님을 정말 삭제하시겠습니까?\n해당 사용자와 관련된 누적 연동 광고 데이터가 모두 함께 영구 파기됩니다.`)) return;
+    try {
+      const response = await fetch(`/api/admin/users/${user.id}`, { method: 'DELETE' });
+      const result = await response.json();
+      if (result.success) {
+        alert(result.message);
+        fetchUsersList();
+      } else {
+        alert(result.error || '사용자 삭제 실패');
+      }
+    } catch (err) {
+      alert('삭제 중 서버 에러가 발생했습니다.');
+    }
+  };
+
+  // G. (ADMIN 전용) 신규 등록 모달 열기
+  const openAddUserModal = () => {
+    setModalUserTitle('신규 사용자 등록');
+    setEditingUserId(null);
+    setFormUserName('');
+    setFormLoginId('');
+    setFormNaverApiKey('');
+    setFormNaverSecretKey('');
+    setFormNaverCustomerId('');
+    setFormRole('USER');
+    setFormPassword('');
+    setUserModalError('');
+    setShowUserModal(true);
+  };
+
+  // H. (ADMIN 전용) 사용자 정보 수정 모달 열기
+  const openEditUserModal = (user: DashboardUser) => {
+    setModalUserTitle(`'${user.user_name}' 정보 수정`);
+    setEditingUserId(user.id);
+    setFormUserName(user.user_name);
+    setFormLoginId(user.login_id);
+    setFormNaverApiKey(user.naver_api_key || '');
+    setFormNaverSecretKey(user.naver_secret_key || '');
+    setFormNaverCustomerId(user.naver_customer_id || '');
+    setFormRole(user.role);
+    setFormPassword(''); // 기본은 비워둠 (입력 시에만 변경)
+    setUserModalError('');
+    setShowUserModal(true);
+  };
+
+  // 1. 광고주 계정 목록 조회 (Supabase - 격리 필터 적용)
   const fetchAccounts = async () => {
+    if (!currentUser) return;
     try {
       setLoadingAccounts(true);
-      const { data, error } = await supabase
+      
+      let query = supabase
         .from('advertiser_accounts')
-        .select('*')
-        .order('ad_account_name', { ascending: true });
+        .select('*');
+      
+      // 멀티테넌트 권한에 따른 조회 격리
+      const filterUserId = currentUser.role === 'ADMIN' ? selectedUserFilter : currentUser.id;
+      if (filterUserId) {
+        query = query.eq('user_id', filterUserId);
+      } else {
+        // 필터 아이디가 없는 상태면 빈 리스트 반환
+        setAccounts([]);
+        setLoadingAccounts(false);
+        return;
+      }
+
+      const { data, error } = await query.order('ad_account_name', { ascending: true });
 
       if (error) throw error;
       setAccounts(data || []);
@@ -206,12 +477,13 @@ export default function Dashboard() {
     }
   };
 
-  // 2-0. Supabase 1,000개 기본 페이지네이션 제한 우회용 전체 데이터 병렬 조회 헬퍼 (결과 보장을 위한 결정적 정렬 추가)
+  // 2-0. Supabase 1,000개 기본 페이지네이션 제한 우회용 전체 데이터 병렬 조회 헬퍼 (결과 보장을 위한 결정적 정렬 및 격리 적용)
   const supabaseFetchAll = async (
     table: string,
     customerId: string,
     since: string,
-    until: string
+    until: string,
+    userId: string
   ): Promise<any[]> => {
     let allData: any[] = [];
     let from = 0;
@@ -227,6 +499,7 @@ export default function Dashboard() {
         .from(table)
         .select('*')
         .eq('customer_id', customerId)
+        .eq('user_id', userId) // 멀티테넌트 격리 조건 강제
         .gte('date', since)
         .lte('date', until)
         .order('date', { ascending: true })
@@ -243,12 +516,13 @@ export default function Dashboard() {
     return allData;
   };
 
-  // 2-0-1. Supabase 마스터 이름 조회용 전체 페이지네이션 헬퍼 (결과 보장을 위한 결정적 정렬 추가)
+  // 2-0-1. Supabase 마스터 이름 조회용 전체 페이지네이션 헬퍼 (결과 보장을 위한 결정적 정렬 및 격리 적용)
   const supabaseFetchNames = async (
     table: string,
     customerId: string,
     idField: string,
-    nameField: string
+    nameField: string,
+    userId: string
   ): Promise<any[]> => {
     let allData: any[] = [];
     let from = 0;
@@ -259,6 +533,7 @@ export default function Dashboard() {
         .from(table)
         .select(`${idField}, ${nameField}`)
         .eq('customer_id', customerId)
+        .eq('user_id', userId) // 멀티테넌트 격리 조건 강제
         .order(idField, { ascending: true })
         .range(from, from + batchSize - 1);
         
@@ -274,11 +549,14 @@ export default function Dashboard() {
 
   // 2-0-2. 마스터 이름 정보 캐시 병렬 로드 함수 (날짜 변경과 별개로 광고주 변경/동기화 시점에만 호출하여 불필요한 과부하 방지)
   const fetchMasterNames = async (customerId: string) => {
-    if (!customerId) return;
+    if (!currentUser || !customerId) return;
+    const filterUserId = currentUser.role === 'ADMIN' ? selectedUserFilter : currentUser.id;
+    if (!filterUserId) return;
+
     try {
       const [campNamesData, adgNamesData] = await Promise.all([
-        supabaseFetchNames('campaign_stats', customerId, 'campaign_id', 'campaign_name'),
-        supabaseFetchNames('adgroup_stats', customerId, 'adgroup_id', 'adgroup_name')
+        supabaseFetchNames('campaign_stats', customerId, 'campaign_id', 'campaign_name', filterUserId),
+        supabaseFetchNames('adgroup_stats', customerId, 'adgroup_id', 'adgroup_name', filterUserId)
       ]);
 
       if (campNamesData) {
@@ -307,17 +585,20 @@ export default function Dashboard() {
 
   // 2. 선택된 광고주의 지정 기간 캠페인, 광고그룹, 소재 데이터 조회 및 집계 (Supabase)
   const fetchCampaignAndAdGroupStats = async (customerId: string, forceSyncIfEmpty: boolean = true) => {
-    if (!customerId) return;
+    if (!currentUser || !customerId) return;
+    const filterUserId = currentUser.role === 'ADMIN' ? selectedUserFilter : currentUser.id;
+    if (!filterUserId) return;
+
     try {
       setLoadingCampaigns(true);
       setLoadingAdgroups(true);
       setLoadingAds(true);
       
-      // DB에서 지정 날짜 범위로 데이터 병렬 조회 (페이지네이션 및 결정적 정렬 적용)
+      // DB에서 지정 날짜 범위로 데이터 병렬 조회 (페이지네이션, 정렬 및 격리 적용)
       const [campData, adgData, adData] = await Promise.all([
-        supabaseFetchAll('campaign_stats', customerId, since, until),
-        supabaseFetchAll('adgroup_stats', customerId, since, until),
-        supabaseFetchAll('ad_stats', customerId, since, until)
+        supabaseFetchAll('campaign_stats', customerId, since, until, filterUserId),
+        supabaseFetchAll('adgroup_stats', customerId, since, until, filterUserId),
+        supabaseFetchAll('ad_stats', customerId, since, until, filterUserId)
       ]);
 
       // 며칠간의 데이터가 필요한지 기대치 계산
@@ -509,9 +790,17 @@ export default function Dashboard() {
 
   // 4. 네이버 API 광고주 목록 동기화
   const handleSyncAccounts = async () => {
+    if (!currentUser) return;
     try {
       setSyncingAccounts(true);
-      const response = await fetch('/api/sync/accounts', { method: 'POST' });
+      
+      // ADMIN이 대리동기화 중이면 대상 targetUserId 전달
+      let url = '/api/sync/accounts';
+      if (currentUser.role === 'ADMIN' && selectedUserFilter) {
+        url += `?targetUserId=${selectedUserFilter}`;
+      }
+
+      const response = await fetch(url, { method: 'POST' });
       const result = await response.json();
       
       if (result.success) {
@@ -529,7 +818,10 @@ export default function Dashboard() {
 
   // 5. 특정 광고주 지정 기간의 캠페인 및 광고그룹 통계 실시간 동기화
   const handleSyncCampaigns = async (customerId: string) => {
-    if (!customerId) return;
+    if (!currentUser || !customerId) return;
+    const filterUserId = currentUser.role === 'ADMIN' ? selectedUserFilter : currentUser.id;
+    if (!filterUserId) return;
+
     try {
       setSyncingCampaigns(true);
       let url = `/api/sync/campaigns?customerId=${customerId}`;
@@ -538,15 +830,21 @@ export default function Dashboard() {
       } else {
         url += `&datePreset=${datePreset}`;
       }
+
+      // ADMIN이 대리동기화 중이면 대상 targetUserId 전달
+      if (currentUser.role === 'ADMIN' && selectedUserFilter) {
+        url += `&targetUserId=${selectedUserFilter}`;
+      }
+
       const response = await fetch(url, { method: 'POST' });
       const result = await response.json();
       
       if (result.success) {
         // 동기화 완료 후 DB에서 다시 범위 데이터 쿼리 및 마스터 이름 정보 비동기 갱신
         const [campData, adgData, adData] = await Promise.all([
-          supabaseFetchAll('campaign_stats', customerId, since, until),
-          supabaseFetchAll('adgroup_stats', customerId, since, until),
-          supabaseFetchAll('ad_stats', customerId, since, until)
+          supabaseFetchAll('campaign_stats', customerId, since, until, filterUserId),
+          supabaseFetchAll('adgroup_stats', customerId, since, until, filterUserId),
+          supabaseFetchAll('ad_stats', customerId, since, until, filterUserId)
         ]);
 
         // 마스터 이름 캐시 최신화 (동기화 완료 후 비동기 호출)
@@ -557,12 +855,7 @@ export default function Dashboard() {
         aggregateAndSetAds(adData);
         
         // 광고주 리스트의 갱신 시각 업데이트
-        const { data: updatedAccs } = await supabase
-          .from('advertiser_accounts')
-          .select('*')
-          .order('ad_account_name', { ascending: true });
-        if (updatedAccs) setAccounts(updatedAccs);
-        
+        await fetchAccounts();
       } else {
         alert(`캠페인, 광고그룹, 소재 동기화 실패: ${result.error}`);
       }
@@ -572,48 +865,6 @@ export default function Dashboard() {
       setSyncingCampaigns(false);
     }
   };
-
-  // 초기 렌더링 시 계정 목록 로드 및 KST 어제 날짜 초기화
-  useEffect(() => {
-    fetchAccounts();
-
-    const now = new Date();
-    const kstNow = new Date(now.getTime() + (9 * 60 * 60 * 1000));
-    const yesterday = new Date(kstNow.getTime() - (24 * 60 * 60 * 1000));
-    const formatDate = (d: Date) => {
-      const year = d.getUTCFullYear();
-      const month = String(d.getUTCMonth() + 1).padStart(2, '0');
-      const day = String(d.getUTCDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
-    };
-    const yesterdayStr = formatDate(yesterday);
-    setCustomSince(yesterdayStr);
-    setCustomUntil(yesterdayStr);
-  }, []);
-
-  // 선택된 계정이 바뀔 때만 마스터 이름 캐시 로드 (성능 최적화: 날짜 변경 시 불필요한 대용량 마스터 이름 쿼리 방지)
-  useEffect(() => {
-    if (selectedAccountId) {
-      fetchMasterNames(selectedAccountId);
-    } else {
-      setCampaignMasterNames(new Map());
-      setAdgroupMasterNames(new Map());
-    }
-  }, [selectedAccountId]);
-
-  // 선택된 계정, 날짜 프리셋 또는 커스텀 날짜 범위가 바뀔 때마다 캠페인, 광고그룹, 소재 데이터를 갱신
-  useEffect(() => {
-    if (selectedAccountId) {
-      if (datePreset === 'custom' && (!customSince || !customUntil)) return;
-      fetchCampaignAndAdGroupStats(selectedAccountId, true);
-    } else {
-      setCampaigns([]);
-      setAdgroups([]);
-      setAds([]);
-    }
-    setExpandedCampaignIds(new Set());
-    setExpandedAdgroupIds(new Set());
-  }, [selectedAccountId, datePreset, customSince, customUntil]);
 
   // 테이블 정렬 핸들러
   const handleSort = (key: SortKey) => {
@@ -776,6 +1027,66 @@ export default function Dashboard() {
     document.body.removeChild(link);
   };
 
+  // 초기 마운트 시 인증 체크
+  useEffect(() => {
+    fetchCurrentUser();
+
+    const now = new Date();
+    const kstNow = new Date(now.getTime() + (9 * 60 * 60 * 1000));
+    const yesterday = new Date(kstNow.getTime() - (24 * 60 * 60 * 1000));
+    const formatDate = (d: Date) => {
+      const year = d.getUTCFullYear();
+      const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(d.getUTCDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+    const yesterdayStr = formatDate(yesterday);
+    setCustomSince(yesterdayStr);
+    setCustomUntil(yesterdayStr);
+  }, []);
+
+  // ADMIN 권한인 경우 전체 유저 목록 로드 및 필터링 감시
+  useEffect(() => {
+    if (currentUser?.role === 'ADMIN') {
+      fetchUsersList();
+    }
+  }, [currentUser]);
+
+  // 유저 필터 혹은 광고주 선택 시 계정 재갱신
+  useEffect(() => {
+    if (currentUser) {
+      fetchAccounts();
+      setSelectedAccountId('');
+      setCampaigns([]);
+      setAdgroups([]);
+      setAds([]);
+    }
+  }, [currentUser, selectedUserFilter]);
+
+  // 선택된 계정, 날짜 프리셋 또는 커스텀 날짜 범위가 바뀔 때마다 캠페인, 광고그룹, 소재 데이터를 갱신
+  useEffect(() => {
+    if (selectedAccountId) {
+      if (datePreset === 'custom' && (!customSince || !customUntil)) return;
+      fetchCampaignAndAdGroupStats(selectedAccountId, true);
+    } else {
+      setCampaigns([]);
+      setAdgroups([]);
+      setAds([]);
+    }
+    setExpandedCampaignIds(new Set());
+    setExpandedAdgroupIds(new Set());
+  }, [selectedAccountId, datePreset, customSince, customUntil]);
+
+  // 선택된 계정이 바뀔 때만 마스터 이름 캐시 로드
+  useEffect(() => {
+    if (selectedAccountId) {
+      fetchMasterNames(selectedAccountId);
+    } else {
+      setCampaignMasterNames(new Map());
+      setAdgroupMasterNames(new Map());
+    }
+  }, [selectedAccountId]);
+
   const activeAccount = accounts.find(acc => acc.customer_id === selectedAccountId);
 
   // 광고주 검색 필터
@@ -787,7 +1098,7 @@ export default function Dashboard() {
     );
   });
 
-  // 종합 통계 집계 계산 (기존과 동일하게 유지하되, UI에 구매완료가 중심이 되도록 지원)
+  // 종합 통계 집계 계산
   const summary = campaigns.reduce(
     (acc, curr) => {
       acc.totalImp += curr.imp_cnt;
@@ -812,24 +1123,19 @@ export default function Dashboard() {
 
   const avgCtr = summary.totalImp > 0 ? (summary.totalClk / summary.totalImp) * 100 : 0;
   const avgCpc = summary.totalClk > 0 ? Math.round(summary.totalCost / summary.totalClk) : 0;
-  const overallRoas = summary.totalCost > 0 ? (summary.totalConvAmt / summary.totalCost) * 100 : 0;
   const purchaseRoas = summary.totalCost > 0 ? (summary.totalPurchaseConvAmt / summary.totalCost) * 100 : 0;
-  const avgCpa = summary.totalCcnt > 0 ? Math.round(summary.totalCost / summary.totalCcnt) : 0;
   const avgPurchaseCpa = summary.totalPurchaseCcnt > 0 ? Math.round(summary.totalCost / summary.totalPurchaseCcnt) : 0;
 
   // 캠페인 이름 검색 및 소팅 적용
   const filteredCampaigns = campaigns
     .filter(camp => camp.campaign_name.toLowerCase().includes(campaignSearchTerm.toLowerCase()))
     .sort((a, b) => {
-      // 캠페인에 존재하는 키로 안전하게 좁히기
       const sKey = (sortKey === 'adgroup_name' || sortKey === 'ad_name' ? 'campaign_name' : sortKey) as keyof CampaignStat;
       const aVal = a[sKey];
       const bVal = b[sKey];
 
       if (typeof aVal === 'string' && typeof bVal === 'string') {
-        return sortOrder === 'asc'
-          ? aVal.localeCompare(bVal)
-          : bVal.localeCompare(aVal);
+        return sortOrder === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
       } else {
         const aNum = (aVal as number) || 0;
         const bNum = (bVal as number) || 0;
@@ -841,15 +1147,12 @@ export default function Dashboard() {
   const filteredAdgroups = adgroups
     .filter(adg => adg.adgroup_name.toLowerCase().includes(adgroupSearchTerm.toLowerCase()))
     .sort((a, b) => {
-      // 광고그룹에 존재하는 키로 안전하게 좁히기
       const sKey = (sortKey === 'campaign_name' || sortKey === 'ad_name' ? 'adgroup_name' : sortKey) as keyof AdGroupStat;
       const aVal = a[sKey];
       const bVal = b[sKey];
 
       if (typeof aVal === 'string' && typeof bVal === 'string') {
-        return sortOrder === 'asc'
-          ? aVal.localeCompare(bVal)
-          : bVal.localeCompare(aVal);
+        return sortOrder === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
       } else {
         const aNum = (aVal as number) || 0;
         const bNum = (bVal as number) || 0;
@@ -861,15 +1164,12 @@ export default function Dashboard() {
   const filteredAds = ads
     .filter(adItem => adItem.ad_name.toLowerCase().includes(adSearchTerm.toLowerCase()))
     .sort((a, b) => {
-      // 소재에 존재하는 키로 안전하게 좁히기
       const sKey = (sortKey === 'campaign_name' || sortKey === 'adgroup_name' ? 'ad_name' : sortKey) as keyof AdStat;
       const aVal = a[sKey];
       const bVal = b[sKey];
 
       if (typeof aVal === 'string' && typeof bVal === 'string') {
-        return sortOrder === 'asc'
-          ? aVal.localeCompare(bVal)
-          : bVal.localeCompare(aVal);
+        return sortOrder === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
       } else {
         const aNum = (aVal as number) || 0;
         const bNum = (bVal as number) || 0;
@@ -885,15 +1185,52 @@ export default function Dashboard() {
   // 소재 테이블 소속 광고그룹명 매핑 객체 빌드
   const adgMapForView = new Map(adgroups.map(g => [g.adgroup_id, g.adgroup_name]));
 
+  if (loadingUser) {
+    return (
+      <div className="fullscreen-loading">
+        <div className="spinner" style={{ width: '40px', height: '40px' }}></div>
+        <p className="loading-text" style={{ marginTop: '16px' }}>사용자 인증을 확인하는 중입니다...</p>
+        <style jsx>{`
+          .fullscreen-loading {
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background-color: #0b0f19;
+          }
+        `}</style>
+      </div>
+    );
+  }
+
   return (
     <div className="dashboard-container">
       {/* 1. 사이드바 - 광고주 목록 */}
       <aside className="sidebar">
-        <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 100px)' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 120px)' }}>
           <div className="logo-section">
             <div className="logo-icon">N</div>
             <div className="logo-text">Premium Adboard</div>
           </div>
+
+          {/* ADMIN 전용 유저 선택 필터 */}
+          {currentUser?.role === 'ADMIN' && (
+            <div className="admin-user-selector-container">
+              <span className="menu-title" style={{ padding: 0 }}>👤 관리대상 유저 선택</span>
+              <select
+                value={selectedUserFilter}
+                onChange={(e) => setSelectedUserFilter(e.target.value)}
+                className="admin-select-input"
+              >
+                {usersList.map(u => (
+                  <option key={u.id} value={u.id}>
+                    {u.user_name} ({u.login_id})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           
           <h3 className="menu-title">광고주 계정 목록</h3>
 
@@ -923,7 +1260,10 @@ export default function Dashboard() {
                 <div
                   key={acc.customer_id}
                   className={`account-item ${selectedAccountId === acc.customer_id ? 'active' : ''}`}
-                  onClick={() => setSelectedAccountId(acc.customer_id)}
+                  onClick={() => {
+                    setActiveTab('campaign'); // 계정 선택 시 강제로 분석 탭으로 복귀
+                    setSelectedAccountId(acc.customer_id);
+                  }}
                 >
                   <span className="account-name">{acc.ad_account_name}</span>
                   <span className="account-id">고객 ID: {acc.customer_id}</span>
@@ -936,21 +1276,33 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <button
-          className="btn-premium"
-          onClick={handleSyncAccounts}
-          disabled={syncingAccounts}
-          style={{ width: '100%', marginTop: 'auto' }}
-        >
-          {syncingAccounts ? (
-            <>
-              <div className="spinner"></div>
-              <span>광고주 동기화 중...</span>
-            </>
-          ) : (
-            <span>🔄 Naver 광고주 목록 갱신</span>
-          )}
-        </button>
+        {/* 하단 사용자 제어 영역 */}
+        <div className="sidebar-footer-container">
+          <div className="user-profile-widget">
+            <span className="user-profile-name">👤 {currentUser?.user_name} 님</span>
+            <span className="user-profile-role">{currentUser?.role === 'ADMIN' ? '최고 관리자' : '일반 사용자'}</span>
+          </div>
+
+          <div className="sidebar-action-buttons">
+            <button className="btn-sidebar-secondary" onClick={() => handleSyncAccounts()} disabled={syncingAccounts}>
+              {syncingAccounts ? '동기화 중...' : '🔄 광고주 목록 갱신'}
+            </button>
+            <button className="btn-sidebar-secondary" onClick={() => { 
+              setPasswordError(''); 
+              setPasswordSuccess(''); 
+              setEditProfileName(currentUser?.user_name || '');
+              setCurrentPassword('');
+              setNewPassword('');
+              setConfirmPassword('');
+              setShowPasswordModal(true); 
+            }}>
+              ⚙️ 개인 정보 변경
+            </button>
+            <button className="btn-sidebar-danger" onClick={handleLogout}>
+              🚪 로그아웃
+            </button>
+          </div>
+        </div>
       </aside>
 
       {/* 2. 메인 패널 */}
@@ -959,16 +1311,24 @@ export default function Dashboard() {
         <header className="dashboard-header">
           <div className="title-group">
             <h1 className="dashboard-title">
-              {activeAccount ? `${activeAccount.ad_account_name} 성과분석` : '네이버 검색광고 대시보드'}
+              {activeTab === 'users' 
+                ? '⚙️ 대시보드 사용자 계정 관리 (ADMIN)' 
+                : activeAccount 
+                  ? `${activeAccount.ad_account_name} 성과분석` 
+                  : '네이버 검색광고 대시보드'}
             </h1>
             <p className="dashboard-subtitle">
-              {activeAccount ? `고객 ID: ${activeAccount.customer_id} (권한: ${activeAccount.account_role})` : '왼쪽 사이드바에서 광고주 계정을 선택하세요.'}
+              {activeTab === 'users'
+                ? '관리자 전용 사용자 계정 CRUD 및 개별 네이버 API Credentials 등록/수정 제어 패널'
+                : activeAccount 
+                  ? `고객 ID: ${activeAccount.customer_id} (권한: ${activeAccount.account_role})` 
+                  : '왼쪽 사이드바에서 광고주 계정을 선택하세요.'}
             </p>
           </div>
           
           <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
             {/* 기간 프리셋 선택 셀렉트 박스 */}
-            {selectedAccountId && (
+            {selectedAccountId && activeTab !== 'users' && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>📅 조회 기간:</span>
                 <select
@@ -1016,7 +1376,7 @@ export default function Dashboard() {
             )}
 
             {/* 실시간 재동기화 버튼 */}
-            {selectedAccountId && (
+            {selectedAccountId && activeTab !== 'users' && (
               <button
                 className="btn-premium"
                 style={{
@@ -1041,14 +1401,126 @@ export default function Dashboard() {
               </button>
             )}
 
-            <div className="date-badge">
-              <span>조회 기준일자</span>
-              <strong>{datePreset === 'yesterday' ? since : `${since} ~ ${until}`}</strong>
-            </div>
+            {activeTab !== 'users' && (
+              <div className="date-badge">
+                <span>조회 기준일자</span>
+                <strong>{datePreset === 'yesterday' ? since : `${since} ~ ${until}`}</strong>
+              </div>
+            )}
           </div>
         </header>
 
-        {selectedAccountId ? (
+        {activeTab === 'users' ? (
+          /* ========================================================
+             어드민 전용 사용자 계정 관리 탭 화면 (ADMIN 전용)
+             ======================================================== */
+          <section className="campaigns-section">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--panel-border)', paddingBottom: '12px' }}>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  onClick={() => { setActiveTab('campaign'); }}
+                  style={{
+                    background: 'transparent',
+                    border: '1px solid var(--panel-border)',
+                    color: 'var(--text-secondary)',
+                    padding: '10px 20px',
+                    borderRadius: '12px',
+                    fontWeight: '600',
+                    fontSize: '0.85rem',
+                    cursor: 'pointer'
+                  }}
+                >
+                  📂 성과 대시보드로 돌아가기
+                </button>
+              </div>
+
+              <button
+                onClick={openAddUserModal}
+                className="btn-premium"
+                style={{
+                  background: 'linear-gradient(135deg, var(--primary-cyan), var(--primary-blue))',
+                  padding: '10px 18px',
+                  fontSize: '0.85rem'
+                }}
+              >
+                ➕ 신규 사용자 계정 등록
+              </button>
+            </div>
+
+            <div className="section-header">
+              <h2 className="section-title">등록된 사용자 리스트 (총 {usersList.length}명)</h2>
+            </div>
+
+            {loadingUsersList ? (
+              <div className="loading-view glass-panel">
+                <div className="spinner"></div>
+                <div className="loading-text">사용자 계정 불러오는 중...</div>
+              </div>
+            ) : usersList.length === 0 ? (
+              <div className="empty-view glass-panel">
+                <div className="empty-text">등록된 사용자가 없습니다.</div>
+              </div>
+            ) : (
+              <div className="table-container">
+                <table className="premium-table">
+                  <thead>
+                    <tr>
+                      <th>사용자 이름</th>
+                      <th>로그인 ID</th>
+                      <th>권한</th>
+                      <th>네이버 매니저 ID</th>
+                      <th>네이버 API Key (일부)</th>
+                      <th>등록 일시</th>
+                      <th style={{ textAlign: 'center' }}>작업</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {usersList.map(u => (
+                      <tr key={u.id}>
+                        <td style={{ fontWeight: 600 }}>{u.user_name}</td>
+                        <td style={{ color: 'var(--primary-cyan)', fontWeight: 600 }}>{u.login_id}</td>
+                        <td>
+                          <span className={`badge ${u.role === 'ADMIN' ? 'paused' : 'eligible'}`} style={{ textTransform: 'none' }}>
+                            {u.role === 'ADMIN' ? '최고 관리자' : '일반 사용자'}
+                          </span>
+                        </td>
+                        <td>{u.naver_customer_id}</td>
+                        <td style={{ fontFamily: 'monospace', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                          {u.naver_api_key ? `${u.naver_api_key.substring(0, 10)}...` : '-'}
+                        </td>
+                        <td style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                          {new Date(u.created_at).toLocaleString('ko-KR', { hour12: false })}
+                        </td>
+                        <td>
+                          <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
+                            <button
+                              className="btn-sidebar-secondary"
+                              style={{ margin: 0, padding: '4px 10px', fontSize: '0.75rem' }}
+                              onClick={() => openEditUserModal(u)}
+                            >
+                              ⚙️ 수정
+                            </button>
+                            <button
+                              className="btn-sidebar-danger"
+                              style={{ margin: 0, padding: '4px 10px', fontSize: '0.75rem' }}
+                              onClick={() => handleDeleteUser(u)}
+                              disabled={u.id === currentUser?.id}
+                            >
+                              🗑️ 삭제
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        ) : selectedAccountId ? (
+          /* ========================================================
+             일반 성과분석 대시보드 화면
+             ======================================================== */
           <>
             {/* 로딩/동기화 상태 */}
             {syncingCampaigns ? (
@@ -1101,7 +1573,7 @@ export default function Dashboard() {
 
                 {/* 4. 캠페인 / 광고그룹 / 소재 성과 탭 & 테이블 섹션 */}
                 <section className="campaigns-section">
-                  {/* 탭 인터페이스 & CSV 다운로드 버튼 헤더 영역 */}
+                  {/* 탭 인터페이스 & 어드민 유저관리 탭 및 CSV 다운로드 버튼 헤더 영역 */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--panel-border)', paddingBottom: '12px' }}>
                     <div style={{ display: 'flex', gap: '8px' }}>
                       <button
@@ -1158,6 +1630,26 @@ export default function Dashboard() {
                       >
                         🎨 소재 성과 현황
                       </button>
+
+                      {/* ADMIN 전용 사용자 관리 탭 신설 */}
+                      {currentUser?.role === 'ADMIN' && (
+                        <button
+                          onClick={() => { setActiveTab('users'); }}
+                          style={{
+                            background: 'transparent',
+                            border: '1px solid rgba(244, 63, 94, 0.3)',
+                            color: 'var(--primary-rose)',
+                            padding: '10px 20px',
+                            borderRadius: '12px',
+                            fontWeight: '700',
+                            fontSize: '0.85rem',
+                            cursor: 'pointer',
+                            transition: 'var(--transition-smooth)'
+                          }}
+                        >
+                          ⚙️ 사용자 계정 관리
+                        </button>
+                      )}
                     </div>
 
                     <button
@@ -1223,7 +1715,6 @@ export default function Dashboard() {
                           <tbody>
                             {filteredCampaigns.map(camp => {
                               const isExpanded = expandedCampaignIds.has(camp.campaign_id);
-                              // 이 캠페인에 소속된 광고그룹 필터링
                               const subAdgroups = adgroups.filter(adg => adg.campaign_id === camp.campaign_id);
 
                               return (
@@ -1586,6 +2077,392 @@ export default function Dashboard() {
           </div>
         )}
       </main>
+
+      {/* ========================================================
+         비밀번호 변경 모달 팝업
+         ======================================================== */}
+      {showPasswordModal && (
+        <div className="modal-overlay">
+          <div className="modal-card glass-panel" style={{ maxWidth: '400px' }}>
+            <div className="modal-header">
+              <h3>⚙️ 개인 정보 및 비밀번호 변경</h3>
+              <button className="btn-modal-close" onClick={() => setShowPasswordModal(false)}>×</button>
+            </div>
+            
+            <form onSubmit={handleChangeProfile} style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginTop: '16px' }}>
+              {passwordError && <div className="error-alert" style={{ fontSize: '0.75rem', padding: '8px' }}>{passwordError}</div>}
+              {passwordSuccess && <div className="success-alert">{passwordSuccess}</div>}
+              
+              <div className="input-group">
+                <label className="input-label" style={{ fontSize: '0.65rem' }}>사용자 이름 (실명)</label>
+                <input
+                  type="text"
+                  className="login-input"
+                  style={{ padding: '10px 14px', fontSize: '0.85rem' }}
+                  value={editProfileName}
+                  onChange={(e) => setEditProfileName(e.target.value)}
+                  disabled={changingPassword}
+                  required
+                />
+              </div>
+
+              <div className="input-group">
+                <label className="input-label" style={{ fontSize: '0.65rem' }}>현재 비밀번호 (본인 확인용)</label>
+                <input
+                  type="password"
+                  className="login-input"
+                  style={{ padding: '10px 14px', fontSize: '0.85rem' }}
+                  placeholder="현재 비밀번호를 입력하세요"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  disabled={changingPassword}
+                  required
+                />
+              </div>
+
+              <div className="input-group">
+                <label className="input-label" style={{ fontSize: '0.65rem' }}>새 비밀번호 (선택 사항)</label>
+                <input
+                  type="password"
+                  className="login-input"
+                  style={{ padding: '10px 14px', fontSize: '0.85rem' }}
+                  placeholder="변경할 경우에만 입력하세요"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  disabled={changingPassword}
+                />
+              </div>
+
+              <div className="input-group">
+                <label className="input-label" style={{ fontSize: '0.65rem' }}>새 비밀번호 확인</label>
+                <input
+                  type="password"
+                  className="login-input"
+                  style={{ padding: '10px 14px', fontSize: '0.85rem' }}
+                  placeholder="새 비밀번호를 다시 입력하세요"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  disabled={changingPassword}
+                />
+              </div>
+
+              <div className="modal-actions">
+                <button type="button" className="btn-sidebar-secondary" onClick={() => setShowPasswordModal(false)} disabled={changingPassword}>
+                  취소
+                </button>
+                <button type="submit" className="btn-premium" style={{ padding: '10px 16px' }} disabled={changingPassword}>
+                  {changingPassword ? '저장 중...' : '저장 및 변경'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
+         (ADMIN 전용) 사용자 추가/수정 모달 팝업
+         ======================================================== */}
+      {showUserModal && currentUser?.role === 'ADMIN' && (
+        <div className="modal-overlay">
+          <div className="modal-card glass-panel" style={{ maxWidth: '500px' }}>
+            <div className="modal-header">
+              <h3>👤 {modalUserTitle}</h3>
+              <button className="btn-modal-close" onClick={() => setShowUserModal(false)}>×</button>
+            </div>
+            
+            <form onSubmit={handleSaveUser} style={{ display: 'flex', flexDirection: 'column', gap: '14px', marginTop: '16px' }}>
+              {userModalError && <div className="error-alert" style={{ fontSize: '0.75rem', padding: '8px' }}>{userModalError}</div>}
+              
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div className="input-group">
+                  <label className="input-label" style={{ fontSize: '0.65rem' }}>사용자 이름 (실명)</label>
+                  <input
+                    type="text"
+                    className="login-input"
+                    style={{ padding: '10px 14px', fontSize: '0.85rem' }}
+                    placeholder="예: 홍길동"
+                    value={formUserName}
+                    onChange={(e) => setFormUserName(e.target.value)}
+                    disabled={savingUser}
+                    required
+                  />
+                </div>
+
+                <div className="input-group">
+                  <label className="input-label" style={{ fontSize: '0.65rem' }}>로그인 ID</label>
+                  <input
+                    type="text"
+                    className="login-input"
+                    style={{ padding: '10px 14px', fontSize: '0.85rem' }}
+                    placeholder="예: gildong"
+                    value={formLoginId}
+                    onChange={(e) => setFormLoginId(e.target.value)}
+                    disabled={savingUser || !!editingUserId} // 수정 시 ID 변경 방지
+                    required
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div className="input-group">
+                  <label className="input-label" style={{ fontSize: '0.65rem' }}>권한 역할 (Role)</label>
+                  <select
+                    value={formRole}
+                    onChange={(e) => setFormRole(e.target.value)}
+                    className="admin-select-input"
+                    style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid var(--panel-border)', padding: '10px 14px', borderRadius: '12px', fontSize: '0.85rem', color: '#f8fafc', outline: 'none' }}
+                  >
+                    <option value="USER">USER (일반 사용자)</option>
+                    <option value="ADMIN">ADMIN (최고 관리자)</option>
+                  </select>
+                </div>
+
+                <div className="input-group">
+                  <label className="input-label" style={{ fontSize: '0.65rem' }}>
+                    {editingUserId ? '비밀번호 강제 재설정 (선택)' : '초기 비밀번호 (고정)'}
+                  </label>
+                  <input
+                    type="password"
+                    className="login-input"
+                    style={{ padding: '10px 14px', fontSize: '0.85rem' }}
+                    placeholder={editingUserId ? '변경 시에만 입력' : '최초 등록 시 0000 강제 설정'}
+                    value={editingUserId ? formPassword : '0000'}
+                    onChange={(e) => setFormPassword(e.target.value)}
+                    disabled={savingUser || !editingUserId} // 신규 등록 시에는 '0000' 고정
+                  />
+                </div>
+              </div>
+
+              <div className="input-group">
+                <label className="input-label" style={{ fontSize: '0.65rem' }}>NAVER API KEY</label>
+                <input
+                  type="text"
+                  className="login-input"
+                  style={{ padding: '10px 14px', fontSize: '0.8rem', fontFamily: 'monospace' }}
+                  placeholder="0100000000..."
+                  value={formNaverApiKey}
+                  onChange={(e) => setFormNaverApiKey(e.target.value)}
+                  disabled={savingUser}
+                  required
+                />
+              </div>
+
+              <div className="input-group">
+                <label className="input-label" style={{ fontSize: '0.65rem' }}>NAVER SECRET KEY</label>
+                <input
+                  type="text"
+                  className="login-input"
+                  style={{ padding: '10px 14px', fontSize: '0.8rem', fontFamily: 'monospace' }}
+                  placeholder="AQAAAAB..."
+                  value={formNaverSecretKey}
+                  onChange={(e) => setFormNaverSecretKey(e.target.value)}
+                  disabled={savingUser}
+                  required
+                />
+              </div>
+
+              <div className="input-group">
+                <label className="input-label" style={{ fontSize: '0.65rem' }}>NAVER CUSTOMER ID (매니저 계정 ID)</label>
+                <input
+                  type="text"
+                  className="login-input"
+                  style={{ padding: '10px 14px', fontSize: '0.85rem' }}
+                  placeholder="예: 1282664"
+                  value={formNaverCustomerId}
+                  onChange={(e) => setFormNaverCustomerId(e.target.value)}
+                  disabled={savingUser}
+                  required
+                />
+              </div>
+
+              <div className="modal-actions" style={{ marginTop: '10px' }}>
+                <button type="button" className="btn-sidebar-secondary" onClick={() => setShowUserModal(false)} disabled={savingUser}>
+                  취소
+                </button>
+                <button type="submit" className="btn-premium" style={{ padding: '10px 16px' }} disabled={savingUser}>
+                  {savingUser ? '저장 중...' : '사용자 저장'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 글로벌 스타일 오버레이 모달 */}
+      <style jsx global>{`
+        /* 어드민 셀렉트 박스 */
+        .admin-user-selector-container {
+          margin-bottom: 24px;
+          padding: 0 8px;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+
+        .admin-select-input {
+          background: rgba(15, 23, 42, 0.8);
+          border: 1px solid rgba(244, 63, 94, 0.4);
+          padding: 8px 12px;
+          border-radius: 10px;
+          color: var(--primary-rose);
+          font-size: 0.85rem;
+          font-weight: 700;
+          outline: none;
+          cursor: pointer;
+          width: 100%;
+          transition: var(--transition-smooth);
+        }
+
+        .admin-select-input:focus {
+          border-color: var(--primary-rose);
+          box-shadow: 0 0 10px rgba(244, 63, 94, 0.2);
+        }
+
+        /* 사이드바 하단 프로필 섹션 */
+        .sidebar-footer-container {
+          border-top: 1px solid var(--panel-border);
+          padding: 16px 8px 0 8px;
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+        }
+
+        .user-profile-widget {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+
+        .user-profile-name {
+          font-size: 0.9rem;
+          font-weight: 700;
+          color: var(--text-primary);
+        }
+
+        .user-profile-role {
+          font-size: 0.72rem;
+          color: var(--text-secondary);
+          font-weight: 600;
+        }
+
+        .sidebar-action-buttons {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+
+        .btn-sidebar-secondary {
+          background: rgba(255, 255, 255, 0.03);
+          border: 1px solid var(--panel-border);
+          color: var(--text-secondary);
+          padding: 8px 12px;
+          border-radius: 8px;
+          font-size: 0.75rem;
+          font-weight: 600;
+          cursor: pointer;
+          transition: var(--transition-smooth);
+          width: 100%;
+          text-align: left;
+        }
+
+        .btn-sidebar-secondary:hover {
+          background: rgba(255, 255, 255, 0.08);
+          color: var(--text-primary);
+        }
+
+        .btn-sidebar-danger {
+          background: rgba(244, 63, 94, 0.05);
+          border: 1px solid rgba(244, 63, 94, 0.2);
+          color: var(--primary-rose);
+          padding: 8px 12px;
+          border-radius: 8px;
+          font-size: 0.75rem;
+          font-weight: 700;
+          cursor: pointer;
+          transition: var(--transition-smooth);
+          width: 100%;
+          text-align: left;
+        }
+
+        .btn-sidebar-danger:hover {
+          background: rgba(244, 63, 94, 0.15);
+        }
+
+        /* 모달 팝업 오버레이 */
+        .modal-overlay {
+          position: fixed;
+          top: 0;
+          left: 0;
+          width: 100vw;
+          height: 100vh;
+          background: rgba(0, 0, 0, 0.7);
+          backdrop-filter: blur(8px);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 9999;
+          animation: fade-in 0.2s ease-out;
+        }
+
+        .modal-card {
+          width: 100%;
+          padding: 32px;
+          background: rgba(30, 41, 59, 0.6) !important;
+          border-radius: 20px;
+          box-shadow: 0 20px 50px rgba(0,0,0,0.6);
+          position: relative;
+        }
+
+        .modal-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          border-bottom: 1px solid var(--panel-border);
+          padding-bottom: 14px;
+        }
+
+        .modal-header h3 {
+          font-size: 1.1rem;
+          font-weight: 800;
+          color: #f8fafc;
+        }
+
+        .btn-modal-close {
+          background: transparent;
+          border: none;
+          color: var(--text-secondary);
+          font-size: 1.5rem;
+          cursor: pointer;
+          line-height: 1;
+        }
+
+        .btn-modal-close:hover {
+          color: var(--text-primary);
+        }
+
+        .modal-actions {
+          display: flex;
+          justify-content: flex-end;
+          gap: 10px;
+          margin-top: 20px;
+        }
+
+        .success-alert {
+          background: rgba(16, 185, 129, 0.1);
+          border: 1px solid rgba(16, 185, 129, 0.25);
+          color: var(--primary-emerald);
+          padding: 10px;
+          border-radius: 8px;
+          font-size: 0.8rem;
+          font-weight: 600;
+          text-align: center;
+        }
+
+        @keyframes fade-in {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+      `}</style>
     </div>
   );
 }

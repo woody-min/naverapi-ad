@@ -1,6 +1,8 @@
 import { NextResponse, NextRequest } from 'next/server';
+import { cookies } from 'next/headers';
 import crypto from 'crypto';
 import { supabase } from '@/lib/supabase';
+import { decryptSession } from '@/lib/auth';
 
 const BASE_URL = 'https://api.searchad.naver.com';
 
@@ -15,6 +17,9 @@ function generateSignature(timestamp: string, method: string, uri: string, secre
 
 async function callNaverApi(
   uri: string,
+  apiKey: string,
+  secretKey: string,
+  managerCustomerId: string,
   method: string = 'GET',
   queryParams?: URLSearchParams,
   targetCustomerId?: string
@@ -24,17 +29,8 @@ async function callNaverApi(
 
   while (attempt < maxRetries) {
     try {
-      const apiKey = process.env.NAVER_API_KEY;
-      const secretKey = process.env.NAVER_SECRET_KEY;
-      const managerCustomerId = process.env.NAVER_CUSTOMER_ID;
-
-      if (!apiKey || !secretKey || !managerCustomerId) {
-        throw new Error('Naver API keys are missing in environment variables.');
-      }
-
       const timestamp = Date.now().toString();
       const signature = generateSignature(timestamp, method, uri, secretKey);
-
       const customerId = targetCustomerId || managerCustomerId;
 
       const headers: HeadersInit = {
@@ -158,24 +154,59 @@ function getDatesInRange(since: string, until: string): string[] {
 
 export async function POST(req: NextRequest) {
   try {
+    // 1. 세션 검증
+    const cookieStore = await cookies();
+    const sessionToken = cookieStore.get('app_session')?.value;
+
+    if (!sessionToken) {
+      return NextResponse.json({ success: false, error: '인증되지 않은 요청입니다. 다시 로그인해 주세요.' }, { status: 401 });
+    }
+
+    const decoded = decryptSession(sessionToken);
+    if (!decoded) {
+      return NextResponse.json({ success: false, error: '유효하지 않은 세션입니다.' }, { status: 401 });
+    }
+
     const { searchParams } = new URL(req.url);
     const customerId = searchParams.get('customerId');
     const datePreset = searchParams.get('datePreset') || 'yesterday';
     const sinceParam = searchParams.get('since');
     const untilParam = searchParams.get('until');
+    const targetUserId = searchParams.get('targetUserId');
 
     if (!customerId) {
       return NextResponse.json({ success: false, error: '광고주 고객 ID(customerId)가 필요합니다.' }, { status: 400 });
     }
 
-    // 1. KST 보정된 실질 날짜 조회 범위 도출
+    // 관리자가 다른 사용자의 정보를 대리 동기화하는지 확인
+    let activeUserId = decoded.userId;
+    if (targetUserId && decoded.role === 'ADMIN') {
+      activeUserId = targetUserId;
+    }
+
+    // 2. DB에서 유저의 네이버 API 키 정보 조회
+    const { data: user, error: userErr } = await supabase
+      .from('dashboard_users')
+      .select('naver_api_key, naver_secret_key, naver_customer_id')
+      .eq('id', activeUserId)
+      .single();
+
+    if (userErr || !user) {
+      return NextResponse.json({ success: false, error: '유저의 네이버 API 키 정보를 조회하지 못했습니다.' }, { status: 404 });
+    }
+
+    const apiKey = user.naver_api_key;
+    const secretKey = user.naver_secret_key;
+    const managerCustomerId = user.naver_customer_id;
+
+    // 3. KST 보정된 실질 날짜 조회 범위 도출
     const { since, until } = getKstDateRange(datePreset, sinceParam, untilParam);
-    console.log(`[Sync Campaigns API] 광고주 ${customerId}의 캠페인 통계 실시간 동기화 (범위: ${since} ~ ${until})...`);
+    console.log(`[Sync Campaigns API] 유저 [${activeUserId}]의 광고주 ${customerId} 캠페인 통계 동기화 시작 (범위: ${since} ~ ${until})...`);
     
-    // 2. 네이버 API에서 해당 광고주의 캠페인 목록 조회 (대리 호출)
+    // 4. 네이버 API에서 해당 광고주의 캠페인 목록 조회
     let campaigns = [];
     try {
-      const campData = await callNaverApi('/ncc/campaigns', 'GET', undefined, customerId);
+      const campData = await callNaverApi('/ncc/campaigns', apiKey, secretKey, managerCustomerId, 'GET', undefined, customerId);
       campaigns = Array.isArray(campData) ? campData : [];
     } catch (err: any) {
       console.error(`[Sync Campaigns API] 캠페인 목록 조회 실패: ${err.message}`);
@@ -189,7 +220,8 @@ export async function POST(req: NextRequest) {
       await supabase
         .from('advertiser_accounts')
         .update({ last_synced_at: new Date().toISOString() })
-        .eq('customer_id', customerId);
+        .eq('customer_id', customerId)
+        .eq('user_id', activeUserId);
 
       return NextResponse.json({
         success: true,
@@ -198,7 +230,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 2-2. 캠페인 산하의 광고그룹 마스터 리스트 수집
+    // 4-2. 캠페인 산하의 광고그룹 마스터 리스트 수집
     const allAdgroups: any[] = [];
     const adgroupMap = new Map<string, any>();
     
@@ -209,7 +241,7 @@ export async function POST(req: NextRequest) {
       await Promise.all(chunk.map(async (camp) => {
         try {
           const queryParams = new URLSearchParams({ nccCampaignId: camp.nccCampaignId });
-          const adgData = await callNaverApi('/ncc/adgroups', 'GET', queryParams, customerId);
+          const adgData = await callNaverApi('/ncc/adgroups', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
           if (Array.isArray(adgData)) {
             allAdgroups.push(...adgData);
             adgData.forEach(adg => {
@@ -224,7 +256,7 @@ export async function POST(req: NextRequest) {
     }
     console.log(`[Sync Campaigns API] 총 ${allAdgroups.length}개의 광고그룹 마스터 정보를 로드했습니다.`);
 
-    // 2-3. 광고그룹 산하의 소재 마스터 리스트 수집
+    // 4-3. 광고그룹 산하의 소재 마스터 리스트 수집
     const allAds: any[] = [];
     const adMap = new Map<string, any>();
     
@@ -235,7 +267,7 @@ export async function POST(req: NextRequest) {
       await Promise.all(chunk.map(async (adg) => {
         try {
           const queryParams = new URLSearchParams({ nccAdgroupId: adg.nccAdgroupId });
-          const adData = await callNaverApi('/ncc/ads', 'GET', queryParams, customerId);
+          const adData = await callNaverApi('/ncc/ads', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
           if (Array.isArray(adData)) {
             allAds.push(...adData);
             adData.forEach(adItem => {
@@ -250,7 +282,7 @@ export async function POST(req: NextRequest) {
     }
     console.log(`[Sync Campaigns API] 총 ${allAds.length}개의 소재 마스터 정보를 로드했습니다.`);
 
-    // 3. 일자별 리스트 생성하여 순회 조회
+    // 5. 일자별 리스트 생성하여 순회 조회
     const dateList = getDatesInRange(since, until);
     console.log(`[Sync Campaigns API] 일자별 순회 조회 시작: 총 ${dateList.length}일 분량...`);
 
@@ -279,7 +311,7 @@ export async function POST(req: NextRequest) {
         });
 
         try {
-          const statsResponse = await callNaverApi('/stats', 'GET', queryParams, customerId);
+          const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
           if (statsResponse && Array.isArray(statsResponse.data)) {
             const dataWithDate = statsResponse.data.map((item: any) => ({
               ...item,
@@ -307,7 +339,7 @@ export async function POST(req: NextRequest) {
           });
 
           try {
-            const statsResponse = await callNaverApi('/stats', 'GET', queryParams, customerId);
+            const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
             if (statsResponse && Array.isArray(statsResponse.data)) {
               const dataWithDate = statsResponse.data.map((item: any) => ({
                 ...item,
@@ -336,7 +368,7 @@ export async function POST(req: NextRequest) {
           });
 
           try {
-            const statsResponse = await callNaverApi('/stats', 'GET', queryParams, customerId);
+            const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
             if (statsResponse && Array.isArray(statsResponse.data)) {
               const dataWithDate = statsResponse.data.map((item: any) => ({
                 ...item,
@@ -354,7 +386,7 @@ export async function POST(req: NextRequest) {
 
     console.log(`[Sync Campaigns API] 통계 로드 완료 (캠페인: ${allStats.length}건, 광고그룹: ${allAdgroupStats.length}건, 소재: ${allAdStats.length}건)`);
 
-    // 4. 마스터 ID와 날짜를 조합한 통계 맵 구성 (0건 성과 매핑용)
+    // 6. 마스터 ID와 날짜를 조합한 통계 맵 구성 (0건 성과 매핑용)
     const campStatsMap = new Map<string, any>();
     allStats.forEach(stat => {
       campStatsMap.set(`${stat.id}:${stat.dateStart}`, stat);
@@ -370,7 +402,7 @@ export async function POST(req: NextRequest) {
       adStatsMap.set(`${stat.id}:${stat.dateStart}`, stat);
     });
 
-    // 5. DB에 적재할 캠페인 Upsert용 배열 가공 (모든 날짜와 모든 캠페인을 루프하여 성과 0건이어도 항상 적재)
+    // 7. DB에 적재할 캠페인 Upsert용 배열 가공
     const campaignStatsToInsert: any[] = [];
     for (const dateStr of dateList) {
       campaigns.forEach(camp => {
@@ -380,6 +412,7 @@ export async function POST(req: NextRequest) {
           campaign_id: camp.nccCampaignId,
           date: dateStr,
           customer_id: customerId,
+          user_id: activeUserId, // 격리 ID 추가!
           campaign_name: camp.name || '알 수 없는 캠페인',
           campaign_type: camp.campaignTp || 'UNKNOWN',
           campaign_status: camp.status || 'UNKNOWN',
@@ -402,7 +435,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 6. 캠페인 DB Upsert 처리 (100개씩 청크 단위)
+    // 7-2. 캠페인 DB Upsert 처리 (100개씩 청크 단위)
     let totalCampaignsSynced = 0;
     const dbChunkSize = 100;
     for (let j = 0; j < campaignStatsToInsert.length; j += dbChunkSize) {
@@ -418,7 +451,7 @@ export async function POST(req: NextRequest) {
       totalCampaignsSynced += dbChunk.length;
     }
 
-    // 7. DB에 적재할 광고그룹 Upsert용 배열 가공 (모든 날짜와 모든 광고그룹을 루프하여 성과 0건이어도 항상 적재)
+    // 8. DB에 적재할 광고그룹 Upsert용 배열 가공
     const adgroupStatsToInsert: any[] = [];
     for (const dateStr of dateList) {
       allAdgroups.forEach(adg => {
@@ -428,6 +461,7 @@ export async function POST(req: NextRequest) {
           adgroup_id: adg.nccAdgroupId,
           date: dateStr,
           customer_id: customerId,
+          user_id: activeUserId, // 격리 ID 추가!
           campaign_id: adg.nccCampaignId || 'UNKNOWN',
           adgroup_name: adg.name || '알 수 없는 광고그룹',
           adgroup_type: adg.adgroupType || 'UNKNOWN',
@@ -452,7 +486,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 8. 광고그룹 DB Upsert 처리 (100개씩 청크 단위)
+    // 8-2. 광고그룹 DB Upsert 처리 (100개씩 청크 단위)
     let totalAdgroupsSynced = 0;
     for (let j = 0; j < adgroupStatsToInsert.length; j += dbChunkSize) {
       const dbChunk = adgroupStatsToInsert.slice(j, j + dbChunkSize);
@@ -467,18 +501,16 @@ export async function POST(req: NextRequest) {
       totalAdgroupsSynced += dbChunk.length;
     }
 
-    // 8-2. DB에 적재할 소재 Upsert용 배열 가공 (모든 날짜와 모든 소재를 루프하여 성과 0건이어도 항상 적재)
+    // 9. DB에 적재할 소재 Upsert용 배열 가공
     const adStatsToInsert: any[] = [];
     for (const dateStr of dateList) {
       allAds.forEach(adItem => {
         const stat = adStatsMap.get(`${adItem.nccAdId}:${dateStr}`) || {};
         const adDetail = adItem.ad || {};
         
-        // 소재가 속한 광고그룹을 매핑하여 상위 캠페인 ID 추출
         const parentAdgroup = adgroupMap.get(adItem.nccAdgroupId) || {};
         const campaignId = parentAdgroup.nccCampaignId || 'UNKNOWN';
         
-        // 소재 이름 가공 우선순위: referenceData.productName || referenceData.productTitle || headline || description || type || '소재'
         const refData = adItem.referenceData || {};
         const adName = refData.productName || refData.productTitle || adDetail.headline || adDetail.description || adItem.type || '소재';
         
@@ -486,6 +518,7 @@ export async function POST(req: NextRequest) {
           ad_id: adItem.nccAdId,
           date: dateStr,
           customer_id: customerId,
+          user_id: activeUserId, // 격리 ID 추가!
           campaign_id: campaignId,
           adgroup_id: adItem.nccAdgroupId || 'UNKNOWN',
           ad_name: adName,
@@ -510,7 +543,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 8-3. 소재 DB Upsert 처리 (100개씩 청크 단위)
+    // 9-2. 소재 DB Upsert 처리 (100개씩 청크 단위)
     let totalAdsSynced = 0;
     for (let j = 0; j < adStatsToInsert.length; j += dbChunkSize) {
       const dbChunk = adStatsToInsert.slice(j, j + dbChunkSize);
@@ -525,17 +558,18 @@ export async function POST(req: NextRequest) {
       totalAdsSynced += dbChunk.length;
     }
 
-    // 9. 광고주 테이블의 last_synced_at 갱신
+    // 10. 광고주 테이블의 last_synced_at 갱신
     const { error: updateAccError } = await supabase
       .from('advertiser_accounts')
       .update({ last_synced_at: new Date().toISOString() })
-      .eq('customer_id', customerId);
+      .eq('customer_id', customerId)
+      .eq('user_id', activeUserId);
 
     if (updateAccError) {
       console.error(`[Sync Campaigns API] 광고주 최신 동기화 시각 업데이트 실패: ${updateAccError.message}`);
     }
 
-    console.log(`[Sync Campaigns API] 광고주 ${customerId} 동기화 완료 (캠페인 ${totalCampaignsSynced}개 행, 광고그룹 ${totalAdgroupsSynced}개 행, 소재 ${totalAdsSynced}개 행 적재)`);
+    console.log(`[Sync Campaigns API] 광고주 ${customerId} 동기화 완료 (유저: [${activeUserId}], 캠페인 ${totalCampaignsSynced}개 행, 광고그룹 ${totalAdgroupsSynced}개 행, 소재 ${totalAdsSynced}개 행 적재)`);
 
     return NextResponse.json({
       success: true,
