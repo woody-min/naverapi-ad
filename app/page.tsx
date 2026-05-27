@@ -697,6 +697,7 @@ export default function Dashboard() {
     if (popSince && popUntil) {
       const currentPeriodCamps = campRaw.filter(r => r.date >= expectedSince && r.date <= expectedUntil);
       const priorPeriodCamps = campRaw.filter(r => r.date >= popSince && r.date <= popUntil);
+      const tempCampaignPops: any[] = [];
 
       const currentAgg: { [key: string]: { imp: number; clk: number; cost: number; purchaseCcnt: number; purchaseConvAmt: number; name: string } } = {};
       currentPeriodCamps.forEach(row => {
@@ -755,7 +756,8 @@ export default function Dashboard() {
         if (prevImp >= 500) {
           const changeRatio = (curImp - prevImp) / prevImp;
           if (Math.abs(changeRatio) >= 0.25) {
-            newPopFeed.push({
+            tempCampaignPops.push({
+              campaignId: cid,
               type: changeRatio > 0 ? 'TRAFFIC_GROWTH' : 'TRAFFIC_DECLINE',
               name: cur.name,
               message: changeRatio > 0 
@@ -772,7 +774,8 @@ export default function Dashboard() {
         if (prevCost >= 30000) {
           const changeRatio = (curCost - prevCost) / prevCost;
           if (Math.abs(changeRatio) >= 0.3) {
-            newPopFeed.push({
+            tempCampaignPops.push({
+              campaignId: cid,
               type: changeRatio > 0 ? 'COST_GROWTH' : 'COST_DECLINE',
               name: cur.name,
               message: changeRatio > 0
@@ -789,7 +792,8 @@ export default function Dashboard() {
         if (prevPurchaseCcnt >= 10) {
           const changeRatio = (curPurchaseCcnt - prevPurchaseCcnt) / prevPurchaseCcnt;
           if (Math.abs(changeRatio) >= 0.3) {
-            newPopFeed.push({
+            tempCampaignPops.push({
+              campaignId: cid,
               type: changeRatio > 0 ? 'PURCHASE_GROWTH' : 'PURCHASE_DECLINE',
               name: cur.name,
               message: changeRatio > 0
@@ -801,6 +805,33 @@ export default function Dashboard() {
             });
           }
         }
+      });
+
+      // 캠페인별 PoP 변동 중복 제거 및 우선순위 필터링 적용
+      const popPriority: { [key: string]: number } = {
+        'PURCHASE_DECLINE': 1,
+        'PURCHASE_GROWTH': 2,
+        'COST_GROWTH': 3,
+        'COST_DECLINE': 4,
+        'TRAFFIC_DECLINE': 5,
+        'TRAFFIC_GROWTH': 6
+      };
+
+      const groupedByCampPop: { [key: string]: any[] } = {};
+      tempCampaignPops.forEach(item => {
+        const key = item.campaignId;
+        if (!groupedByCampPop[key]) groupedByCampPop[key] = [];
+        groupedByCampPop[key].push(item);
+      });
+
+      Object.keys(groupedByCampPop).forEach(key => {
+        const list = groupedByCampPop[key];
+        list.sort((a, b) => {
+          const scoreA = popPriority[a.type] || 99;
+          const scoreB = popPriority[b.type] || 99;
+          return scoreA - scoreB;
+        });
+        newPopFeed.push(list[0]);
       });
     }
 
