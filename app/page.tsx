@@ -1171,9 +1171,9 @@ export default function Dashboard() {
         
         totalExpectedDays = expectedDaysVal + targetUntilDay;
       } else {
-        // [룰 2] 그 외 일반 기간 (예: 최근 7일) -> 직전 동등 일수만큼 뒤로 밀어서 대조 (예: 5/17~5/23 -> 5/10~5/16)
-        const popSinceDate = new Date(startDate.getTime() - expectedDaysVal * 24 * 60 * 60 * 1000);
-        const popUntilDate = new Date(startDate.getTime() - 1 * 24 * 60 * 60 * 1000);
+        // [룰 2] 그 외 일반 기간 (예: 최근 7일) -> 직전 7일(일주일) 전 동일 요일 세트로 대조하여 주말/평일 노이즈 제거 (예: 5/11~5/13 -> 5/4~5/6)
+        const popSinceDate = new Date(startDate.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const popUntilDate = new Date(popSinceDate.getTime() + (expectedDaysVal - 1) * 24 * 60 * 60 * 1000);
         
         const formatDate = (d: Date) => {
           const year = d.getUTCFullYear();
@@ -1184,7 +1184,10 @@ export default function Dashboard() {
 
         popSince = formatDate(popSinceDate);
         popUntil = formatDate(popUntilDate);
-        totalExpectedDays = expectedDaysVal * 2;
+        
+        // 두 기간 사이의 공백(Gap)을 포함한 전체 범위 날짜 수 동적 연산
+        const gapTime = Math.abs(endDate.getTime() - popSinceDate.getTime());
+        totalExpectedDays = Math.ceil(gapTime / (1000 * 60 * 60 * 24)) + 1;
       }
 
       // DB에서 popSince부터 until까지 전체 범위 데이터 병렬 조회 (페이지네이션, 정렬 및 격리 적용)
@@ -1541,8 +1544,9 @@ export default function Dashboard() {
         const targetUntilDay = Math.min(untilDay, lastDayOfPrevMonth);
         calculatedPopUntil = `${prevYear}-${pad(prevMonth)}-${pad(targetUntilDay)}`;
       } else {
-        const popSinceDate = new Date(new Date(since).getTime() - expectedDaysVal * 24 * 60 * 60 * 1000);
-        const popUntilDate = new Date(new Date(since).getTime() - 1 * 24 * 60 * 60 * 1000);
+        // [룰 2] 그 외 일반 기간 -> 직전 7일(일주일) 전 동일 요일 세트로 대조
+        const popSinceDate = new Date(new Date(since).getTime() - 7 * 24 * 60 * 60 * 1000);
+        const popUntilDate = new Date(popSinceDate.getTime() + (expectedDaysVal - 1) * 24 * 60 * 60 * 1000);
         const formatDate = (d: Date) => {
           const year = d.getUTCFullYear();
           const month = String(d.getUTCMonth() + 1).padStart(2, '0');
