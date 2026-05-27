@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, Fragment } from 'react';
+import { useState, useEffect, Fragment, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 
@@ -102,6 +102,9 @@ type SortOrder = 'asc' | 'desc';
 
 export default function Dashboard() {
   const router = useRouter();
+
+  // 비동기 경쟁 상태 (Race Condition) 엇갈림 방지용 참조체
+  const activeRequestRef = useRef<number>(0);
 
   // 1. 사용자 세션 및 권한 관련 상태
   const [currentUser, setCurrentUser] = useState<DashboardUser | null>(null);
@@ -1122,6 +1125,10 @@ export default function Dashboard() {
     const filterUserId = currentUser.role === 'ADMIN' ? selectedUserFilter : currentUser.id;
     if (!filterUserId) return;
 
+    // 비동기 요청 고유 ID 발급 및 기록
+    const requestId = Date.now();
+    activeRequestRef.current = requestId;
+
     try {
       setLoadingCampaigns(true);
       setLoadingAdgroups(true);
@@ -1206,6 +1213,12 @@ export default function Dashboard() {
         console.log(`[Dashboard] DB 내 이전 동등 기간 포함 범위(${popSince} ~ ${until})의 데이터가 불완전함 (가져온 날짜 수: ${distinctDatesInDb}/${totalExpectedDays}일). 실시간 동기화...`);
         await handleSyncCampaigns(customerId, popSince);
       } else {
+        // 비동기 요청 엇갈림 검증 (B요청이 처리된 후 도착한 낡은 A요청 결과 버림)
+        if (requestId !== activeRequestRef.current) {
+          console.log('[Dashboard] 엇갈린 과거 비동기 조회 요청(fetch) 결과 드롭 처리 완료.');
+          return;
+        }
+
         aggregateAndSetCampaigns(currentCampData);
         aggregateAndSetAdgroups(currentAdgData);
         aggregateAndSetAds(currentAdData);
@@ -1415,6 +1428,10 @@ export default function Dashboard() {
     const filterUserId = currentUser.role === 'ADMIN' ? selectedUserFilter : currentUser.id;
     if (!filterUserId) return;
 
+    // 비동기 요청 고유 ID 발급 및 기록
+    const requestId = Date.now();
+    activeRequestRef.current = requestId;
+
     try {
       setSyncingCampaigns(true);
       setSyncProgress(0);
@@ -1504,6 +1521,12 @@ export default function Dashboard() {
       const currentCampData = campData.filter(row => row.date >= since && row.date <= until);
       const currentAdgData = adgData.filter(row => row.date >= since && row.date <= until);
       const currentAdData = adData.filter(row => row.date >= since && row.date <= until);
+
+      // 비동기 요청 엇갈림 검증 (동기화 완료 처리 덮어쓰기 방지)
+      if (requestId !== activeRequestRef.current) {
+        console.log('[Dashboard] 엇갈린 과거 비동기 동기화(sync) 요청 결과 드롭 처리 완료.');
+        return;
+      }
 
       aggregateAndSetCampaigns(currentCampData);
       aggregateAndSetAdgroups(currentAdgData);
