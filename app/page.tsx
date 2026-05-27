@@ -151,6 +151,7 @@ export default function Dashboard() {
   const [loadingBizmoney, setLoadingBizmoney] = useState<boolean>(false);
   const [anomalyFeed, setAnomalyFeed] = useState<any[]>([]);
   const [popFeed, setPopFeed] = useState<any[]>([]);
+  const [selectedAnomaly, setSelectedAnomaly] = useState<any | null>(null);
   
   // 3-tier 아코디언 펼침 ID 세트
   const [expandedCampaignIds, setExpandedCampaignIds] = useState<Set<string>>(new Set());
@@ -162,6 +163,8 @@ export default function Dashboard() {
   // 직접 선택(Custom Range) 날짜 상태
   const [customSince, setCustomSince] = useState<string>('');
   const [customUntil, setCustomUntil] = useState<string>('');
+  const [appliedCustomSince, setAppliedCustomSince] = useState<string>('');
+  const [appliedCustomUntil, setAppliedCustomUntil] = useState<string>('');
   
   // 상태 관리 세분화
   const [loadingAccounts, setLoadingAccounts] = useState<boolean>(true);
@@ -222,8 +225,8 @@ export default function Dashboard() {
       }
       case 'custom':
         return {
-          since: customSince || formatDate(yesterday),
-          until: customUntil || formatDate(yesterday)
+          since: appliedCustomSince || customSince || formatDate(yesterday),
+          until: appliedCustomUntil || customUntil || formatDate(yesterday)
         };
       case 'yesterday':
       default:
@@ -370,7 +373,9 @@ export default function Dashboard() {
     adgRaw: any[],
     adRaw: any[],
     expectedSince: string,
-    expectedUntil: string
+    expectedUntil: string,
+    popSince?: string,
+    popUntil?: string
   ) => {
     if (!campRaw || campRaw.length === 0) {
       setAnomalyFeed([]);
@@ -378,219 +383,382 @@ export default function Dashboard() {
       return;
     }
 
-    const sortedDates = Array.from(new Set(campRaw.map(r => r.date))).sort();
-    if (sortedDates.length < 2) {
-      setAnomalyFeed([]);
-      setPopFeed([]);
-      return;
-    }
-
-    const latestDate = sortedDates[sortedDates.length - 1];
-    const priorDates = sortedDates.slice(0, sortedDates.length - 1);
-    const priorDaysCount = priorDates.length;
-
     const newAnomalyFeed: any[] = [];
     const newPopFeed: any[] = [];
 
     // --- A. 최근 1일 증분 이상 분석 (Latest Daily Increment Anomaly) ---
-    const campLatest = campRaw.filter(r => r.date === latestDate);
-    const campPrior = campRaw.filter(r => r.date !== latestDate);
+    const currentPeriodCamps = campRaw.filter(r => r.date >= expectedSince && r.date <= expectedUntil);
+    const sortedDates = Array.from(new Set(currentPeriodCamps.map(r => r.date))).sort();
 
-    const campPriorSum: { [key: string]: { imp: number; clk: number; cost: number; purchaseCcnt: number; purchaseConvAmt: number } } = {};
-    campPrior.forEach(row => {
-      const cid = row.campaign_id;
-      if (!campPriorSum[cid]) campPriorSum[cid] = { imp: 0, clk: 0, cost: 0, purchaseCcnt: 0, purchaseConvAmt: 0 };
-      campPriorSum[cid].imp += row.imp_cnt || 0;
-      campPriorSum[cid].clk += row.clk_cnt || 0;
-      campPriorSum[cid].cost += row.sales_amt || 0;
-      campPriorSum[cid].purchaseCcnt += row.purchase_ccnt || 0;
-      campPriorSum[cid].purchaseConvAmt += row.purchase_conv_amt || 0;
-    });
+    if (sortedDates.length >= 2) {
+      const latestDate = sortedDates[sortedDates.length - 1];
+      const priorDates = sortedDates.slice(0, sortedDates.length - 1);
+      const priorDaysCount = priorDates.length;
 
-    campLatest.forEach(row => {
-      const cid = row.campaign_id;
-      const prior = campPriorSum[cid];
-      if (!prior) return;
+      const campLatest = currentPeriodCamps.filter(r => r.date === latestDate);
+      const campPrior = currentPeriodCamps.filter(r => r.date !== latestDate);
 
-      const avgImp = prior.imp / priorDaysCount;
-      const avgCost = prior.cost / priorDaysCount;
-      const avgPurchaseCcnt = prior.purchaseCcnt / priorDaysCount;
-      const avgRoas = prior.cost > 0 ? (prior.purchaseConvAmt / prior.cost) * 100 : 0;
+      const campPriorSum: { [key: string]: { imp: number; clk: number; cost: number; purchaseCcnt: number; purchaseConvAmt: number } } = {};
+      campPrior.forEach(row => {
+        const cid = row.campaign_id;
+        if (!campPriorSum[cid]) campPriorSum[cid] = { imp: 0, clk: 0, cost: 0, purchaseCcnt: 0, purchaseConvAmt: 0 };
+        campPriorSum[cid].imp += row.imp_cnt || 0;
+        campPriorSum[cid].clk += row.clk_cnt || 0;
+        campPriorSum[cid].cost += row.sales_amt || 0;
+        campPriorSum[cid].purchaseCcnt += row.purchase_ccnt || 0;
+        campPriorSum[cid].purchaseConvAmt += row.purchase_conv_amt || 0;
+      });
 
-      const curImp = row.imp_cnt || 0;
-      const curCost = row.sales_amt || 0;
-      const curPurchaseCcnt = row.purchase_ccnt || 0;
-      const curRoas = curCost > 0 ? (row.purchase_conv_amt / curCost) * 100 : 0;
+      campLatest.forEach(row => {
+        const cid = row.campaign_id;
+        const prior = campPriorSum[cid];
+        if (!prior) return;
 
-      // 1. 광고비 변동 감지
-      if (avgCost > 1000) {
-        const costRatio = curCost / avgCost;
-        if (costRatio >= 2.0) {
+        const avgImp = prior.imp / priorDaysCount;
+        const avgClk = prior.clk / priorDaysCount;
+        const avgCost = prior.cost / priorDaysCount;
+        const avgPurchaseCcnt = prior.purchaseCcnt / priorDaysCount;
+        const avgCtr = avgImp > 0 ? (avgClk / avgImp) * 100 : 0;
+        const avgCrto = avgClk > 0 ? (prior.purchaseCcnt / prior.clk) * 100 : 0;
+        const avgRoas = prior.cost > 0 ? (prior.purchaseConvAmt / prior.cost) * 100 : 0;
+
+        const curImp = row.imp_cnt || 0;
+        const curClk = row.clk_cnt || 0;
+        const curCost = row.sales_amt || 0;
+        const curPurchaseCcnt = row.purchase_ccnt || 0;
+        const curCtr = curImp > 0 ? (curClk / curImp) * 100 : 0;
+        const curCrto = curClk > 0 ? (curPurchaseCcnt / curClk) * 100 : 0;
+        const curRoas = curCost > 0 ? (row.purchase_conv_amt / curCost) * 100 : 0;
+
+        const details = [
+          { metric: '노출수', prev: Math.round(avgImp), current: Math.round(curImp), unit: '회' },
+          { metric: '클릭수', prev: Math.round(avgClk), current: Math.round(curClk), unit: '회' },
+          { metric: '광고비', prev: Math.round(avgCost), current: Math.round(curCost), unit: '원' },
+          { metric: '구매완료수', prev: Math.round(avgPurchaseCcnt), current: Math.round(curPurchaseCcnt), unit: '건' },
+          { metric: '클릭률(CTR)', prev: Math.round(avgCtr * 100) / 100, current: Math.round(curCtr * 100) / 100, unit: '%' },
+          { metric: '구매전환율(CRTO)', prev: Math.round(avgCrto * 100) / 100, current: Math.round(curCrto * 100) / 100, unit: '%' },
+          { metric: '광고수익률(ROAS)', prev: Math.round(avgRoas), current: Math.round(curRoas), unit: '%' }
+        ];
+
+        // 1. 광고비 변동 감지
+        if (avgCost >= 10000) {
+          const costRatio = curCost / avgCost;
+          if (costRatio >= 2.0) {
+            newAnomalyFeed.push({
+              type: 'SURGE_COST',
+              level: 'CAMPAIGN',
+              name: row.campaign_name,
+              message: `캠페인 일 광고비가 평소(일 평균 ${formatNumber(Math.round(avgCost))}원) 대비 **${((costRatio - 1) * 100).toFixed(0)}% 폭증**한 **${formatNumber(Math.round(curCost))}원** 소진되어 예산 과소진 징후를 감지했습니다.`,
+              ratio: costRatio,
+              details,
+              periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
+            });
+          } else if (curCost <= avgCost * 0.15 && row.campaign_status === 'ELIGIBLE') {
+            newAnomalyFeed.push({
+              type: 'DROP_COST',
+              level: 'CAMPAIGN',
+              name: row.campaign_name,
+              message: `캠페인 일 광고비가 평소(일 평균 ${formatNumber(Math.round(avgCost))}원) 대비 **${((1 - costRatio) * 100).toFixed(0)}% 급감**한 **${formatNumber(Math.round(curCost))}원** 소진에 그쳤습니다. (ON 상태이나 소진 멈춤 감지)`,
+              ratio: costRatio,
+              details,
+              periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
+            });
+          }
+        }
+
+        // 2. 트래픽(노출수) 변동 감지
+        if (avgImp >= 500) {
+          const impRatio = curImp / avgImp;
+          if (impRatio >= 2.5) {
+            newAnomalyFeed.push({
+              type: 'SPIKE_TRAFFIC',
+              level: 'CAMPAIGN',
+              name: row.campaign_name,
+              message: `캠페인 하루 노출수가 평소(일 평균 ${formatNumber(Math.round(avgImp))}회) 대비 **${((impRatio - 1) * 100).toFixed(0)}% 폭증**한 **${formatNumber(curImp)}회**를 기록했습니다!`,
+              ratio: impRatio,
+              details,
+              periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
+            });
+          }
+        }
+
+        // 3. 구매 전환수 급증/급감 감지
+        if (avgPurchaseCcnt >= 3.0) {
+          const purchaseRatio = curPurchaseCcnt / avgPurchaseCcnt;
+          if (purchaseRatio >= 2.0) {
+            newAnomalyFeed.push({
+              type: 'SURGE_PURCHASE',
+              level: 'CAMPAIGN',
+              name: row.campaign_name,
+              message: `캠페인 일 구매완료 수가 평소(일 평균 ${avgPurchaseCcnt.toFixed(1)}건) 대비 **${((purchaseRatio - 1) * 100).toFixed(0)}% 폭증**한 **${curPurchaseCcnt}건**을 기록하며 폭발적인 효율을 기록했습니다!`,
+              ratio: purchaseRatio,
+              details,
+              periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
+            });
+          } else if (purchaseRatio <= 0.2) {
+            newAnomalyFeed.push({
+              type: 'DROP_PURCHASE',
+              level: 'CAMPAIGN',
+              name: row.campaign_name,
+              message: `캠페인 일 구매완료 수가 평소(일 평균 ${avgPurchaseCcnt.toFixed(1)}건) 대비 **${((1 - purchaseRatio) * 100).toFixed(0)}% 급감**한 **${curPurchaseCcnt}건**에 그쳤습니다. 상세 설정이나 상세 페이지 품절 여부를 체크하세요!`,
+              ratio: purchaseRatio,
+              details,
+              periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
+            });
+          }
+        } else if (avgPurchaseCcnt >= 3.0 && curPurchaseCcnt === 0 && priorDaysCount >= 3) {
           newAnomalyFeed.push({
-            type: 'SURGE_COST',
+            type: 'ZERO_PURCHASE',
             level: 'CAMPAIGN',
             name: row.campaign_name,
-            message: `캠페인 일 광고비가 평소(일 평균 ${formatNumber(Math.round(avgCost))}원) 대비 **${((costRatio - 1) * 100).toFixed(0)}% 폭증**한 **${formatNumber(curCost)}원** 소진되어 예산 과소진 징후를 감지했습니다.`,
-            ratio: costRatio
-          });
-        } else if (curCost <= avgCost * 0.15 && row.campaign_status === 'ELIGIBLE') {
-          newAnomalyFeed.push({
-            type: 'DROP_COST',
-            level: 'CAMPAIGN',
-            name: row.campaign_name,
-            message: `캠페인 일 광고비가 평소(일 평균 ${formatNumber(Math.round(avgCost))}원) 대비 **${((1 - costRatio) * 100).toFixed(0)}% 급감**한 **${formatNumber(curCost)}원** 소진에 그쳤습니다. (ON 상태이나 소진 멈춤 감지)`,
-            ratio: costRatio
+            message: `평소 꾸준히 구매 전환이 일어나던 캠페인이나, 오늘 하루 **구매 완료가 0건**에 그쳤습니다. 전환 링크 작동 여부를 점검해 보세요.`,
+            ratio: 0,
+            details,
+            periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
           });
         }
-      }
 
-      // 2. 트래픽(노출수) 변동 감지
-      if (avgImp > 100) {
-        const impRatio = curImp / avgImp;
-        if (impRatio >= 2.5) {
+        // 4. 광고수익률(ROAS) 급증/급감 감지
+        if (avgRoas > 10 && avgCost >= 10000 && avgImp >= 500 && avgClk >= 10) {
+          const roasRatio = curRoas / avgRoas;
+          if (roasRatio >= 1.5) {
+            newAnomalyFeed.push({
+              type: 'SURGE_ROAS',
+              level: 'CAMPAIGN',
+              name: row.campaign_name,
+              message: `캠페인 하루 구매 ROAS가 평소(일 평균 ${avgRoas.toFixed(0)}%) 대비 **${((roasRatio - 1) * 100).toFixed(0)}% 급상승**한 **${curRoas.toFixed(0)}%**를 달성하여 광고 효율이 극대화되었습니다!`,
+              ratio: roasRatio,
+              details,
+              periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
+            });
+          } else if (roasRatio <= 0.3) {
+            newAnomalyFeed.push({
+              type: 'DROP_ROAS',
+              level: 'CAMPAIGN',
+              name: row.campaign_name,
+              message: `캠페인 하루 구매 ROAS가 평소(일 평균 ${avgRoas.toFixed(0)}%) 대비 **${((1 - roasRatio) * 100).toFixed(0)}% 폭락**한 **${curRoas.toFixed(0)}%**에 그쳐 효율 저하 징후를 감지했습니다. 소재 교체 타이밍인지 확인해 보세요.`,
+              ratio: roasRatio,
+              details,
+              periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
+            });
+          }
+        }
+
+        // 5. 클릭률(CTR) 급증/급감 감지 (추가)
+        if (avgCtr > 0.1 && avgImp >= 500 && avgClk >= 30) {
+          const ctrRatio = curCtr / avgCtr;
+          if (ctrRatio >= 1.8) {
+            newAnomalyFeed.push({
+              type: 'SURGE_CTR',
+              level: 'CAMPAIGN',
+              name: row.campaign_name,
+              message: `캠페인 하루 클릭률(CTR)이 평소(일 평균 ${avgCtr.toFixed(2)}%) 대비 **${((ctrRatio - 1) * 100).toFixed(0)}% 급상승**한 **${curCtr.toFixed(2)}%**를 달성하여 유입 효율이 극대화되었습니다!`,
+              ratio: ctrRatio,
+              details,
+              periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
+            });
+          } else if (ctrRatio <= 0.4) {
+            newAnomalyFeed.push({
+              type: 'DROP_CTR',
+              level: 'CAMPAIGN',
+              name: row.campaign_name,
+              message: `캠페인 하루 클릭률(CTR)이 평소(일 평균 ${avgCtr.toFixed(2)}%) 대비 **${((1 - ctrRatio) * 100).toFixed(0)}% 급락**한 **${curCtr.toFixed(2)}%**에 그쳐 소재 매력도가 떨어진 징후를 감지했습니다. 소재 교체 타이밍을 검토해 보세요.`,
+              ratio: ctrRatio,
+              details,
+              periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
+            });
+          }
+        }
+
+        // 6. 구매 전환율(CRTO) 급증/급감 감지 (추가)
+        if (avgCrto > 0.1 && avgClk >= 100 && avgPurchaseCcnt >= 5) {
+          const crtoRatio = curCrto / avgCrto;
+          if (crtoRatio >= 2.0) {
+            newAnomalyFeed.push({
+              type: 'SURGE_CRTO',
+              level: 'CAMPAIGN',
+              name: row.campaign_name,
+              message: `캠페인 하루 구매 전환율(CRTO)이 평소(일 평균 ${avgCrto.toFixed(2)}%) 대비 **${((crtoRatio - 1) * 100).toFixed(0)}% 폭증**한 **${curCrto.toFixed(2)}%**를 달성하며 폭발적인 구매력을 보였습니다!`,
+              ratio: crtoRatio,
+              details,
+              periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
+            });
+          } else if (crtoRatio <= 0.2) {
+            newAnomalyFeed.push({
+              type: 'DROP_CRTO',
+              level: 'CAMPAIGN',
+              name: row.campaign_name,
+              message: `캠페인 하루 구매 전환율(CRTO)이 평소(일 평균 ${avgCrto.toFixed(2)}%) 대비 **${((1 - crtoRatio) * 100).toFixed(0)}% 급락**한 **${curCrto.toFixed(2)}%**에 그쳤습니다. 상세 페이지나 결제 오류가 없는지 점검하세요.`,
+              ratio: crtoRatio,
+              details,
+              periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
+            });
+          }
+        }
+      });
+
+      // 광고그룹 Anomaly 감지
+      const currentPeriodAdgs = adgRaw.filter(r => r.date >= expectedSince && r.date <= expectedUntil);
+      const adgLatest = currentPeriodAdgs.filter(r => r.date === latestDate);
+      const adgPrior = currentPeriodAdgs.filter(r => r.date !== latestDate);
+
+      const adgPriorSum: { [key: string]: { imp: number; clk: number; cost: number } } = {};
+      adgPrior.forEach(row => {
+         const gid = row.adgroup_id;
+         if (!adgPriorSum[gid]) adgPriorSum[gid] = { imp: 0, clk: 0, cost: 0 };
+         adgPriorSum[gid].imp += row.imp_cnt || 0;
+         adgPriorSum[gid].clk += row.clk_cnt || 0;
+         adgPriorSum[gid].cost += row.sales_amt || 0;
+      });
+
+      adgLatest.forEach(row => {
+         const gid = row.adgroup_id;
+         const prior = adgPriorSum[gid];
+         if (!prior) return;
+
+         const avgAdgCost = prior.cost / priorDaysCount;
+         const avgAdgImp = prior.imp / priorDaysCount;
+         const avgAdgClk = prior.clk / priorDaysCount;
+         const curAdgCost = row.sales_amt || 0;
+         const curAdgImp = row.imp_cnt || 0;
+         const curAdgClk = row.clk_cnt || 0;
+         const avgAdgCtr = avgAdgImp > 0 ? (avgAdgClk / avgAdgImp) * 100 : 0;
+         const curAdgCtr = curAdgImp > 0 ? (curAdgClk / curAdgImp) * 100 : 0;
+
+         const adgDetails = [
+           { metric: '노출수', prev: Math.round(avgAdgImp), current: Math.round(curAdgImp), unit: '회' },
+           { metric: '클릭수', prev: Math.round(avgAdgClk), current: Math.round(curAdgClk), unit: '회' },
+           { metric: '광고비', prev: Math.round(avgAdgCost), current: Math.round(curAdgCost), unit: '원' },
+           { metric: '클릭률(CTR)', prev: Math.round(avgAdgCtr * 100) / 100, current: Math.round(curAdgCtr * 100) / 100, unit: '%' }
+         ];
+
+         if (avgAdgCost >= 10000 && curAdgCost <= avgAdgCost * 0.05 && row.adgroup_status === 'ELIGIBLE') {
           newAnomalyFeed.push({
-            type: 'SPIKE_TRAFFIC',
-            level: 'CAMPAIGN',
-            name: row.campaign_name,
-            message: `캠페인 하루 노출수가 평소(일 평균 ${formatNumber(Math.round(avgImp))}회) 대비 **${((impRatio - 1) * 100).toFixed(0)}% 폭증**한 **${formatNumber(curImp)}회**를 기록했습니다!`,
-            ratio: impRatio
+            type: 'DROP_COST_ADGROUP',
+            level: 'ADGROUP',
+            name: row.adgroup_name,
+            message: `광고그룹 일 소진액이 평소 일 평균(${formatNumber(Math.round(avgAdgCost))}원) 대비 **95% 이상 급감**한 **${formatNumber(Math.round(curAdgCost))}원** 소진되었습니다. 광고 세팅 노출제한 여부나 링크 품절을 긴급 체크하세요!`,
+            ratio: curAdgCost / avgAdgCost,
+            details: adgDetails,
+            periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
           });
         }
-      }
-
-      // 3. 구매 전환수 급증/급감 감지
-      if (avgPurchaseCcnt > 0.3) {
-        const purchaseRatio = curPurchaseCcnt / avgPurchaseCcnt;
-        if (purchaseRatio >= 2.0) {
-          newAnomalyFeed.push({
-            type: 'SURGE_PURCHASE',
-            level: 'CAMPAIGN',
-            name: row.campaign_name,
-            message: `캠페인 일 구매완료 수가 평소(일 평균 ${avgPurchaseCcnt.toFixed(1)}건) 대비 **${((purchaseRatio - 1) * 100).toFixed(0)}% 폭증**한 **${curPurchaseCcnt}건**을 기록하며 폭발적인 효율을 기록했습니다!`,
-            ratio: purchaseRatio
-          });
-        } else if (purchaseRatio <= 0.2) {
-          newAnomalyFeed.push({
-            type: 'DROP_PURCHASE',
-            level: 'CAMPAIGN',
-            name: row.campaign_name,
-            message: `캠페인 일 구매완료 수가 평소(일 평균 ${avgPurchaseCcnt.toFixed(1)}건) 대비 **${((1 - purchaseRatio) * 100).toFixed(0)}% 급감**한 **${curPurchaseCcnt}건**에 그쳤습니다. 상세 설정이나 상세 페이지 품절 여부를 체크하세요!`,
-            ratio: purchaseRatio
-          });
-        }
-      } else if (avgPurchaseCcnt > 0 && curPurchaseCcnt === 0 && priorDaysCount >= 3) {
-        newAnomalyFeed.push({
-          type: 'ZERO_PURCHASE',
-          level: 'CAMPAIGN',
-          name: row.campaign_name,
-          message: `평소 꾸준히 구매 전환이 일어나던 캠페인이나, 오늘 하루 **구매 완료가 0건**에 그쳤습니다. 전환 링크 작동 여부를 점검해 보세요.`,
-          ratio: 0
-        });
-      }
-
-      // 4. 광고수익률(ROAS) 급증/급감 감지
-      if (avgRoas > 10 && curCost > 1000) {
-        const roasRatio = curRoas / avgRoas;
-        if (roasRatio >= 1.5) {
-          newAnomalyFeed.push({
-            type: 'SURGE_ROAS',
-            level: 'CAMPAIGN',
-            name: row.campaign_name,
-            message: `캠페인 하루 구매 ROAS가 평소(일 평균 ${avgRoas.toFixed(0)}%) 대비 **${((roasRatio - 1) * 100).toFixed(0)}% 급상승**한 **${curRoas.toFixed(0)}%**를 달성하여 광고 효율이 극대화되었습니다!`,
-            ratio: roasRatio
-          });
-        } else if (roasRatio <= 0.3) {
-          newAnomalyFeed.push({
-            type: 'DROP_ROAS',
-            level: 'CAMPAIGN',
-            name: row.campaign_name,
-            message: `캠페인 하루 구매 ROAS가 평소(일 평균 ${avgRoas.toFixed(0)}%) 대비 **${((1 - roasRatio) * 100).toFixed(0)}% 폭락**한 **${curRoas.toFixed(0)}%**에 그쳐 효율 저하 징후를 감지했습니다. 소재 교체 타이밍인지 확인해 보세요.`,
-            ratio: roasRatio
-          });
-        }
-      }
-    });
-
-    const adgLatest = adgRaw.filter(r => r.date === latestDate);
-    const adgPrior = adgRaw.filter(r => r.date !== latestDate);
-
-    const adgPriorSum: { [key: string]: { imp: number; clk: number; cost: number } } = {};
-    adgPrior.forEach(row => {
-      const gid = row.adgroup_id;
-      if (!adgPriorSum[gid]) adgPriorSum[gid] = { imp: 0, clk: 0, cost: 0 };
-      adgPriorSum[gid].imp += row.imp_cnt || 0;
-      adgPriorSum[gid].clk += row.clk_cnt || 0;
-      adgPriorSum[gid].cost += row.sales_amt || 0;
-    });
-
-    adgLatest.forEach(row => {
-      const gid = row.adgroup_id;
-      const prior = adgPriorSum[gid];
-      if (!prior) return;
-
-      const avgCost = prior.cost / priorDaysCount;
-      const curCost = row.sales_amt || 0;
-
-      if (avgCost > 3000 && curCost <= avgCost * 0.05 && row.adgroup_status === 'ELIGIBLE') {
-        newAnomalyFeed.push({
-          type: 'DROP_COST_ADGROUP',
-          level: 'ADGROUP',
-          name: row.adgroup_name,
-          message: `광고그룹 일 소진액이 평소 일 평균(${formatNumber(Math.round(avgCost))}원) 대비 **95% 이상 급감**한 **${formatNumber(curCost)}원** 소진되었습니다. 광고 세팅 노출제한 여부나 링크 품절을 긴급 체크하세요!`,
-          ratio: curCost / avgCost
-        });
-      }
-    });
+      });
+    }
 
     // --- B. 직전 기간 대비 변동(Period over Period) 분석 피드 ---
-    const campGrouped: { [key: string]: { imp: number; clk: number; cost: number; name: string } } = {};
-    campPrior.forEach(row => {
-      const cid = row.campaign_id;
-      if (!campGrouped[cid]) campGrouped[cid] = { imp: 0, clk: 0, cost: 0, name: row.campaign_name };
-      campGrouped[cid].imp += row.imp_cnt || 0;
-      campGrouped[cid].clk += row.clk_cnt || 0;
-      campGrouped[cid].cost += row.sales_amt || 0;
-    });
+    if (popSince && popUntil) {
+      const currentPeriodCamps = campRaw.filter(r => r.date >= expectedSince && r.date <= expectedUntil);
+      const priorPeriodCamps = campRaw.filter(r => r.date >= popSince && r.date <= popUntil);
 
-    const latestAggregated: { [key: string]: { imp: number; clk: number; cost: number; name: string } } = {};
-    campLatest.forEach(row => {
-      const cid = row.campaign_id;
-      if (!latestAggregated[cid]) latestAggregated[cid] = { imp: 0, clk: 0, cost: 0, name: row.campaign_name };
-      latestAggregated[cid].imp += row.imp_cnt || 0;
-      latestAggregated[cid].clk += row.clk_cnt || 0;
-      latestAggregated[cid].cost += row.sales_amt || 0;
-    });
+      const currentAgg: { [key: string]: { imp: number; clk: number; cost: number; purchaseCcnt: number; purchaseConvAmt: number; name: string } } = {};
+      currentPeriodCamps.forEach(row => {
+        const cid = row.campaign_id;
+        if (!currentAgg[cid]) currentAgg[cid] = { imp: 0, clk: 0, cost: 0, purchaseCcnt: 0, purchaseConvAmt: 0, name: row.campaign_name };
+        currentAgg[cid].imp += row.imp_cnt || 0;
+        currentAgg[cid].clk += row.clk_cnt || 0;
+        currentAgg[cid].cost += row.sales_amt || 0;
+        currentAgg[cid].purchaseCcnt += row.purchase_ccnt || 0;
+        currentAgg[cid].purchaseConvAmt += row.purchase_conv_amt || 0;
+      });
 
-    Object.keys(latestAggregated).forEach(cid => {
-      const cur = latestAggregated[cid];
-      const prev = campGrouped[cid];
-      if (!prev) return;
+      const priorAgg: { [key: string]: { imp: number; clk: number; cost: number; purchaseCcnt: number; purchaseConvAmt: number; name: string } } = {};
+      priorPeriodCamps.forEach(row => {
+        const cid = row.campaign_id;
+        if (!priorAgg[cid]) priorAgg[cid] = { imp: 0, clk: 0, cost: 0, purchaseCcnt: 0, purchaseConvAmt: 0, name: row.campaign_name };
+        priorAgg[cid].imp += row.imp_cnt || 0;
+        priorAgg[cid].clk += row.clk_cnt || 0;
+        priorAgg[cid].cost += row.sales_amt || 0;
+        priorAgg[cid].purchaseCcnt += row.purchase_ccnt || 0;
+        priorAgg[cid].purchaseConvAmt += row.purchase_conv_amt || 0;
+      });
 
-      const prevAvgImp = prev.imp / priorDaysCount;
-      const curImp = cur.imp;
+      Object.keys(currentAgg).forEach(cid => {
+        const cur = currentAgg[cid];
+        const prev = priorAgg[cid];
+        if (!prev) return;
 
-      if (prevAvgImp > 50) {
-        const changeRatio = (curImp - prevAvgImp) / prevAvgImp;
-        if (changeRatio >= 0.25) {
-          newPopFeed.push({
-            type: 'TRAFFIC_GROWTH',
-            name: cur.name,
-            message: `노출 트래픽이 이전 일 평균 대비 **${(changeRatio * 100).toFixed(0)}% 급상승**하여 활성화 중입니다!`,
-            ratio: changeRatio
-          });
-        } else if (changeRatio <= -0.25) {
-          newPopFeed.push({
-            type: 'TRAFFIC_DECLINE',
-            name: cur.name,
-            message: `노출 트래픽이 이전 일 평균 대비 **${(Math.abs(changeRatio) * 100).toFixed(0)}% 하락**하여 침체 구간에 진입했습니다.`,
-            ratio: changeRatio
-          });
+        const prevImp = prev.imp;
+        const curImp = cur.imp;
+        const prevClk = prev.clk;
+        const curClk = cur.clk;
+        const prevCost = prev.cost;
+        const curCost = cur.cost;
+        const prevPurchaseCcnt = prev.purchaseCcnt;
+        const curPurchaseCcnt = cur.purchaseCcnt;
+
+        const prevCtr = prevImp > 0 ? (prevClk / prevImp) * 100 : 0;
+        const curCtr = curImp > 0 ? (curClk / curImp) * 100 : 0;
+        const prevCrto = prevClk > 0 ? (prev.purchaseCcnt / prevClk) * 100 : 0;
+        const curCrto = curClk > 0 ? (cur.purchaseCcnt / curClk) * 100 : 0;
+        const prevRoas = prevCost > 0 ? (prev.purchaseConvAmt / prevCost) * 100 : 0;
+        const curRoas = curCost > 0 ? (cur.purchaseConvAmt / curCost) * 100 : 0;
+
+        const details = [
+          { metric: '노출수', prev: Math.round(prevImp), current: Math.round(curImp), unit: '회' },
+          { metric: '클릭수', prev: Math.round(prevClk), current: Math.round(curClk), unit: '회' },
+          { metric: '광고비', prev: Math.round(prevCost), current: Math.round(curCost), unit: '원' },
+          { metric: '구매완료수', prev: Math.round(prevPurchaseCcnt), current: Math.round(curPurchaseCcnt), unit: '건' },
+          { metric: '클릭률(CTR)', prev: Math.round(prevCtr * 100) / 100, current: Math.round(curCtr * 100) / 100, unit: '%' },
+          { metric: '구매전환율(CRTO)', prev: Math.round(prevCrto * 100) / 100, current: Math.round(curCrto * 100) / 100, unit: '%' },
+          { metric: '광고수익률(ROAS)', prev: Math.round(prevRoas), current: Math.round(curRoas), unit: '%' }
+        ];
+
+        // 1. 노출수 변동 비율 감지
+        if (prevImp >= 500) {
+          const changeRatio = (curImp - prevImp) / prevImp;
+          if (Math.abs(changeRatio) >= 0.25) {
+            newPopFeed.push({
+              type: changeRatio > 0 ? 'TRAFFIC_GROWTH' : 'TRAFFIC_DECLINE',
+              name: cur.name,
+              message: changeRatio > 0 
+                ? `이전 동등 기간 대비 노출 트래픽이 **${(changeRatio * 100).toFixed(0)}% 급상승**한 **${formatNumber(Math.round(curImp))}회**를 기록하며 활성화 중입니다!`
+                : `이전 동등 기간 대비 노출 트래픽이 **${(Math.abs(changeRatio) * 100).toFixed(0)}% 급락**한 **${formatNumber(Math.round(curImp))}회**에 그쳐 침체 구간에 진입했습니다.`,
+              ratio: changeRatio,
+              details,
+              periodInfo: `이전 동등 기간(${popSince} ~ ${popUntil}) 대비 이번 기간(${expectedSince} ~ ${expectedUntil})`
+            });
+          }
         }
-      }
-    });
 
-    setAnomalyFeed(newAnomalyFeed.slice(0, 5));
-    setPopFeed(newPopFeed.slice(0, 5));
+        // 2. 광고비 변동 비율 감지
+        if (prevCost >= 30000) {
+          const changeRatio = (curCost - prevCost) / prevCost;
+          if (Math.abs(changeRatio) >= 0.3) {
+            newPopFeed.push({
+              type: changeRatio > 0 ? 'COST_GROWTH' : 'COST_DECLINE',
+              name: cur.name,
+              message: changeRatio > 0
+                ? `이전 동등 기간 대비 소진 광고비가 **${(changeRatio * 100).toFixed(0)}% 급증**한 **${formatNumber(Math.round(curCost))}원**에 달해 예산 소진 속도가 과도하게 빨라졌습니다.`
+                : `이전 동등 기간 대비 소진 광고비가 **${(Math.abs(changeRatio) * 100).toFixed(0)}% 급감**한 **${formatNumber(Math.round(curCost))}원**에 그쳤습니다.`,
+              ratio: changeRatio,
+              details,
+              periodInfo: `이전 동등 기간(${popSince} ~ ${popUntil}) 대비 이번 기간(${expectedSince} ~ ${expectedUntil})`
+            });
+          }
+        }
+
+        // 3. 구매완료수 변동 감지
+        if (prevPurchaseCcnt >= 10) {
+          const changeRatio = (curPurchaseCcnt - prevPurchaseCcnt) / prevPurchaseCcnt;
+          if (Math.abs(changeRatio) >= 0.3) {
+            newPopFeed.push({
+              type: changeRatio > 0 ? 'PURCHASE_GROWTH' : 'PURCHASE_DECLINE',
+              name: cur.name,
+              message: changeRatio > 0
+                ? `이전 동등 기간 대비 구매완료 수가 **${(changeRatio * 100).toFixed(0)}% 폭증**한 **${curPurchaseCcnt}건**을 기록하며 폭발적인 광고 효율을 내고 있습니다!`
+                : `이전 동등 기간 대비 구매완료 수가 **${(Math.abs(changeRatio) * 100).toFixed(0)}% 급감**한 **${curPurchaseCcnt}건**에 그쳤습니다. 소재 교체나 타겟 조정을 검토하세요.`,
+              ratio: changeRatio,
+              details,
+              periodInfo: `이전 동등 기간(${popSince} ~ ${popUntil}) 대비 이번 기간(${expectedSince} ~ ${expectedUntil})`
+            });
+          }
+        }
+      });
+    }
+
+    setAnomalyFeed(newAnomalyFeed.slice(0, 8));
+    setPopFeed(newPopFeed.slice(0, 8));
   };
 
   // D. (ADMIN 전용) 신규/기존 유저 목록 조회
@@ -856,13 +1024,6 @@ export default function Dashboard() {
       setLoadingAdgroups(true);
       setLoadingAds(true);
       
-      // DB에서 지정 날짜 범위로 데이터 병렬 조회 (페이지네이션, 정렬 및 격리 적용)
-      const [campData, adgData, adData] = await Promise.all([
-        supabaseFetchAll('campaign_stats', customerId, since, until, filterUserId),
-        supabaseFetchAll('adgroup_stats', customerId, since, until, filterUserId),
-        supabaseFetchAll('ad_stats', customerId, since, until, filterUserId)
-      ]);
-
       // 며칠간의 데이터가 필요한지 기대치 계산
       const startDate = new Date(since);
       const endDate = new Date(until);
@@ -870,19 +1031,80 @@ export default function Dashboard() {
       const expectedDaysVal = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
       setExpectedDays(expectedDaysVal);
 
-      // DB에 현재 존재하는 고유 날짜 수 계산
-      const distinctDatesInDb = new Set(campData.map(row => row.date)).size;
+      // 직전 동등 기간 (PopPeriod) 지능형 매칭 구하기
+      let popSince: string;
+      let popUntil: string;
+      let totalExpectedDays: number;
 
-      // DB에 이 기간의 데이터가 아예 존재하지 않거나 불완전하게 적재된 경우 네이버 API 동기화 가동
-      if ((campData.length === 0 || adgData.length === 0 || distinctDatesInDb < expectedDaysVal) && forceSyncIfEmpty) {
-        console.log(`[Dashboard] DB 내 해당 기간(${since} ~ ${until})의 데이터가 불완전함 (가져온 날짜 수: ${distinctDatesInDb}/${expectedDaysVal}일). 실시간 동기화...`);
-        await handleSyncCampaigns(customerId);
+      const sinceParts = since.split('-');
+      const sinceYear = parseInt(sinceParts[0], 10);
+      const sinceMonth = parseInt(sinceParts[1], 10);
+      const sinceDay = parseInt(sinceParts[2], 10);
+
+      const untilParts = until.split('-');
+      const untilYear = parseInt(untilParts[0], 10);
+      const untilMonth = parseInt(untilParts[1], 10);
+      const untilDay = parseInt(untilParts[2], 10);
+
+      if (sinceDay === 1) {
+        // [룰 1] 월의 1일부터 시작한 경우 -> 직전 월의 1일부터 동일 일자(N일)까지 대조 (예: 5/1~5/25 -> 4/1~4/25)
+        let prevYear = sinceYear;
+        let prevMonth = sinceMonth - 1;
+        if (prevMonth === 0) {
+          prevMonth = 12;
+          prevYear -= 1;
+        }
+
+        const pad = (n: number) => String(n).padStart(2, '0');
+        popSince = `${prevYear}-${pad(prevMonth)}-01`;
+
+        const lastDayOfPrevMonth = new Date(Date.UTC(prevYear, prevMonth, 0)).getUTCDate();
+        const targetUntilDay = Math.min(untilDay, lastDayOfPrevMonth);
+        popUntil = `${prevYear}-${pad(prevMonth)}-${pad(targetUntilDay)}`;
+        
+        totalExpectedDays = expectedDaysVal + targetUntilDay;
       } else {
-        aggregateAndSetCampaigns(campData);
-        aggregateAndSetAdgroups(adgData);
-        aggregateAndSetAds(adData);
-        // AI 성능 변동 및 이상 징후 감지 엔진 실시간 구동
-        runInsightEngine(campData, adgData, adData, since, until);
+        // [룰 2] 그 외 일반 기간 (예: 최근 7일) -> 직전 동등 일수만큼 뒤로 밀어서 대조 (예: 5/17~5/23 -> 5/10~5/16)
+        const popSinceDate = new Date(startDate.getTime() - expectedDaysVal * 24 * 60 * 60 * 1000);
+        const popUntilDate = new Date(startDate.getTime() - 1 * 24 * 60 * 60 * 1000);
+        
+        const formatDate = (d: Date) => {
+          const year = d.getUTCFullYear();
+          const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const day = String(d.getUTCDate()).padStart(2, '0');
+          return `${year}-${month}-${day}`;
+        };
+
+        popSince = formatDate(popSinceDate);
+        popUntil = formatDate(popUntilDate);
+        totalExpectedDays = expectedDaysVal * 2;
+      }
+
+      // DB에서 popSince부터 until까지 전체 범위 데이터 병렬 조회 (페이지네이션, 정렬 및 격리 적용)
+      const [allCampData, allAdgData, allAdData] = await Promise.all([
+        supabaseFetchAll('campaign_stats', customerId, popSince, until, filterUserId),
+        supabaseFetchAll('adgroup_stats', customerId, popSince, until, filterUserId),
+        supabaseFetchAll('ad_stats', customerId, popSince, until, filterUserId)
+      ]);
+
+      // 메인 테이블 표시용으로 현재 날짜 범위에만 속하는 데이터 분리 필터링
+      const currentCampData = allCampData.filter(row => row.date >= since && row.date <= until);
+      const currentAdgData = allAdgData.filter(row => row.date >= since && row.date <= until);
+      const currentAdData = allAdData.filter(row => row.date >= since && row.date <= until);
+
+      // DB에 이전 동등 기간 + 현재 기간을 아우르는 전체 고유 날짜 수 계산 (popSince ~ until 기준)
+      const distinctDatesInDb = new Set(allCampData.map(row => row.date)).size;
+
+      // DB에 이전 동등 기간 또는 현재 기간 데이터가 아예 존재하지 않거나 날짜 수가 부족한 경우 API 동기화 가동
+      if ((allCampData.length === 0 || allAdgData.length === 0 || distinctDatesInDb < totalExpectedDays) && forceSyncIfEmpty) {
+        console.log(`[Dashboard] DB 내 이전 동등 기간 포함 범위(${popSince} ~ ${until})의 데이터가 불완전함 (가져온 날짜 수: ${distinctDatesInDb}/${totalExpectedDays}일). 실시간 동기화...`);
+        await handleSyncCampaigns(customerId, popSince);
+      } else {
+        aggregateAndSetCampaigns(currentCampData);
+        aggregateAndSetAdgroups(currentAdgData);
+        aggregateAndSetAds(currentAdData);
+        // AI 성능 변동 및 이상 징후 감지 엔진 실시간 구동 (전체 범위 데이터 및 동등 기간 전달)
+        runInsightEngine(allCampData, allAdgData, allAdData, since, until, popSince, popUntil);
       }
     } catch (err: any) {
       console.error('Error fetching campaign & adgroup & ad stats:', err.message);
@@ -1082,7 +1304,7 @@ export default function Dashboard() {
   };
 
   // 5. 특정 광고주 지정 기간의 캠페인 및 광고그룹 통계 실시간 동기화
-  const handleSyncCampaigns = async (customerId: string) => {
+  const handleSyncCampaigns = async (customerId: string, syncSince?: string) => {
     if (!currentUser || !customerId) return;
     const filterUserId = currentUser.role === 'ADMIN' ? selectedUserFilter : currentUser.id;
     if (!filterUserId) return;
@@ -1090,8 +1312,10 @@ export default function Dashboard() {
     try {
       setSyncingCampaigns(true);
       let url = `/api/sync/campaigns?customerId=${customerId}`;
-      if (datePreset === 'custom') {
-        url += `&since=${since}&until=${until}`;
+      
+      const startSince = syncSince || since;
+      if (syncSince || datePreset === 'custom') {
+        url += `&since=${startSince}&until=${until}`;
       } else {
         url += `&datePreset=${datePreset}`;
       }
@@ -1107,17 +1331,67 @@ export default function Dashboard() {
       if (result.success) {
         // 동기화 완료 후 DB에서 다시 범위 데이터 쿼리 및 마스터 이름 정보 비동기 갱신
         const [campData, adgData, adData] = await Promise.all([
-          supabaseFetchAll('campaign_stats', customerId, since, until, filterUserId),
-          supabaseFetchAll('adgroup_stats', customerId, since, until, filterUserId),
-          supabaseFetchAll('ad_stats', customerId, since, until, filterUserId)
+          supabaseFetchAll('campaign_stats', customerId, startSince, until, filterUserId),
+          supabaseFetchAll('adgroup_stats', customerId, startSince, until, filterUserId),
+          supabaseFetchAll('ad_stats', customerId, startSince, until, filterUserId)
         ]);
 
         // 마스터 이름 캐시 최신화 (동기화 완료 후 비동기 호출)
         fetchMasterNames(customerId);
 
-        aggregateAndSetCampaigns(campData);
-        aggregateAndSetAdgroups(adgData);
-        aggregateAndSetAds(adData);
+        // 메인 테이블 표시용으로 현재 날짜 범위에만 속하는 데이터 분리 필터링
+        const currentCampData = campData.filter(row => row.date >= since && row.date <= until);
+        const currentAdgData = adgData.filter(row => row.date >= since && row.date <= until);
+        const currentAdData = adData.filter(row => row.date >= since && row.date <= until);
+
+        aggregateAndSetCampaigns(currentCampData);
+        aggregateAndSetAdgroups(currentAdgData);
+        aggregateAndSetAds(currentAdData);
+        
+        // AI 성능 변동 및 이상 징후 감지 엔진 실시간 구동 (전체 범위 데이터 및 동등 기간 전달)
+        const expectedDaysVal = Math.ceil(Math.abs(new Date(until).getTime() - new Date(since).getTime()) / (1000 * 60 * 60 * 24)) + 1;
+        
+        let calculatedPopSince: string;
+        let calculatedPopUntil: string;
+
+        const sinceParts = since.split('-');
+        const sinceYear = parseInt(sinceParts[0], 10);
+        const sinceMonth = parseInt(sinceParts[1], 10);
+        const sinceDay = parseInt(sinceParts[2], 10);
+
+        const untilParts = until.split('-');
+        const untilYear = parseInt(untilParts[0], 10);
+        const untilMonth = parseInt(untilParts[1], 10);
+        const untilDay = parseInt(untilParts[2], 10);
+
+        if (sinceDay === 1) {
+          let prevYear = sinceYear;
+          let prevMonth = sinceMonth - 1;
+          if (prevMonth === 0) {
+            prevMonth = 12;
+            prevYear -= 1;
+          }
+
+          const pad = (n: number) => String(n).padStart(2, '0');
+          calculatedPopSince = `${prevYear}-${pad(prevMonth)}-01`;
+
+          const lastDayOfPrevMonth = new Date(Date.UTC(prevYear, prevMonth, 0)).getUTCDate();
+          const targetUntilDay = Math.min(untilDay, lastDayOfPrevMonth);
+          calculatedPopUntil = `${prevYear}-${pad(prevMonth)}-${pad(targetUntilDay)}`;
+        } else {
+          const popSinceDate = new Date(new Date(since).getTime() - expectedDaysVal * 24 * 60 * 60 * 1000);
+          const popUntilDate = new Date(new Date(since).getTime() - 1 * 24 * 60 * 60 * 1000);
+          const formatDate = (d: Date) => {
+            const year = d.getUTCFullYear();
+            const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+            const day = String(d.getUTCDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+          };
+          calculatedPopSince = formatDate(popSinceDate);
+          calculatedPopUntil = formatDate(popUntilDate);
+        }
+
+        runInsightEngine(campData, adgData, adData, since, until, calculatedPopSince, calculatedPopUntil);
         
         // 광고주 리스트의 갱신 시각 업데이트
         await fetchAccounts();
@@ -1308,6 +1582,8 @@ export default function Dashboard() {
     const yesterdayStr = formatDate(yesterday);
     setCustomSince(yesterdayStr);
     setCustomUntil(yesterdayStr);
+    setAppliedCustomSince(yesterdayStr);
+    setAppliedCustomUntil(yesterdayStr);
   }, []);
 
   // ADMIN 권한인 경우 전체 유저 목록 로드 및 필터링 감시
@@ -1332,7 +1608,7 @@ export default function Dashboard() {
   // 선택된 계정, 날짜 프리셋 또는 커스텀 날짜 범위가 바뀔 때마다 캠페인, 광고그룹, 소재 데이터를 갱신
   useEffect(() => {
     if (selectedAccountId) {
-      if (datePreset === 'custom' && (!customSince || !customUntil)) return;
+      if (datePreset === 'custom' && (!appliedCustomSince || !appliedCustomUntil)) return;
       fetchCampaignAndAdGroupStats(selectedAccountId, true);
 
       // 날짜 일수 계산을 바탕으로 스마트 탭 스위칭 (1일 범위면 'campaign', 2일 이상 범위면 'briefing' 탭 활성화)
@@ -1354,7 +1630,7 @@ export default function Dashboard() {
     }
     setExpandedCampaignIds(new Set());
     setExpandedAdgroupIds(new Set());
-  }, [selectedAccountId, datePreset, customSince, customUntil]);
+  }, [selectedAccountId, datePreset, appliedCustomSince, appliedCustomUntil]);
 
   // 선택된 계정이 바뀔 때만 마스터 이름 캐시 및 실시간 비즈머니 로드
   useEffect(() => {
@@ -1612,7 +1888,7 @@ export default function Dashboard() {
                           gap: '4px',
                           marginLeft: '8px'
                         }}>
-                          💰 비즈머니 잔액: {formatNumber(bizmoneyBalance)}원
+                          💰 비즈머니 잔액: {formatNumber(Math.round(bizmoneyBalance))}원
                         </span>
                       )}
                       {loadingBizmoney && (
@@ -1661,7 +1937,7 @@ export default function Dashboard() {
                 </select>
 
                 {datePreset === 'custom' && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '4px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '4px' }}>
                     <input
                       type="date"
                       value={customSince}
@@ -1675,6 +1951,35 @@ export default function Dashboard() {
                       onChange={(e) => setCustomUntil(e.target.value)}
                       className="date-picker-input"
                     />
+                    <button
+                      onClick={() => {
+                        if (!customSince || !customUntil) {
+                          alert('시작 날짜와 종료 날짜를 모두 입력해 주세요.');
+                          return;
+                        }
+                        if (new Date(customSince) > new Date(customUntil)) {
+                          alert('시작 날짜는 종료 날짜보다 이전이어야 합니다.');
+                          return;
+                        }
+                        setAppliedCustomSince(customSince);
+                        setAppliedCustomUntil(customUntil);
+                      }}
+                      className="btn-premium"
+                      style={{
+                        padding: '6px 14px',
+                        fontSize: '0.8rem',
+                        background: 'linear-gradient(135deg, var(--primary-cyan), var(--primary-blue))',
+                        boxShadow: '0 0 10px rgba(6, 182, 212, 0.2)',
+                        border: 'none',
+                        borderRadius: '8px',
+                        cursor: 'pointer',
+                        color: '#ffffff',
+                        fontWeight: 700,
+                        whiteSpace: 'nowrap'
+                      }}
+                    >
+                      🔍 조회
+                    </button>
                   </div>
                 )}
               </div>
@@ -1692,7 +1997,41 @@ export default function Dashboard() {
                   fontSize: '0.8rem',
                   color: 'var(--primary-cyan)'
                 }}
-                onClick={() => handleSyncCampaigns(selectedAccountId)}
+                onClick={() => {
+                  const startDate = new Date(since);
+                  const endDate = new Date(until);
+                  const diffTime = Math.abs(endDate.getTime() - startDate.getTime());
+                  const expectedDaysVal = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+
+                  let popSince: string;
+
+                  const sinceParts = since.split('-');
+                  const sinceYear = parseInt(sinceParts[0], 10);
+                  const sinceMonth = parseInt(sinceParts[1], 10);
+                  const sinceDay = parseInt(sinceParts[2], 10);
+
+                  if (sinceDay === 1) {
+                    let prevYear = sinceYear;
+                    let prevMonth = sinceMonth - 1;
+                    if (prevMonth === 0) {
+                      prevMonth = 12;
+                      prevYear -= 1;
+                    }
+                    const pad = (n: number) => String(n).padStart(2, '0');
+                    popSince = `${prevYear}-${pad(prevMonth)}-01`;
+                  } else {
+                    const popSinceDate = new Date(startDate.getTime() - expectedDaysVal * 24 * 60 * 60 * 1000);
+                    const formatDate = (d: Date) => {
+                      const year = d.getUTCFullYear();
+                      const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+                      const day = String(d.getUTCDate()).padStart(2, '0');
+                      return `${year}-${month}-${day}`;
+                    };
+                    popSince = formatDate(popSinceDate);
+                  }
+
+                  handleSyncCampaigns(selectedAccountId, popSince);
+                }}
                 disabled={syncingCampaigns || loadingCampaigns || loadingAdgroups || loadingAds}
               >
                 {syncingCampaigns ? (
@@ -1853,7 +2192,7 @@ export default function Dashboard() {
 
                   <div className="stat-card glass-panel rose">
                     <span className="stat-label">소진 광고비</span>
-                    <span className="stat-value">{formatNumber(summary.totalCost)}원</span>
+                    <span className="stat-value">{formatNumber(Math.round(summary.totalCost))}원</span>
                     <div className="stat-detail">
                       <span>평균 CPC: <strong>{formatNumber(avgCpc)}원</strong></span>
                     </div>
@@ -2011,7 +2350,7 @@ export default function Dashboard() {
                           <div>
                             <h3 style={{ color: '#f43f5e', fontWeight: 700, fontSize: '0.95rem', marginBottom: '4px' }}>비즈머니 잔고 소멸 임박 경보</h3>
                             <p style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: '1.5' }}>
-                              현재 광고 계정의 비즈머니 잔액이 <strong>{formatNumber(bizmoneyBalance)}원</strong> 남았습니다. 
+                              현재 광고 계정의 비즈머니 잔액이 <strong>{formatNumber(Math.round(bizmoneyBalance))}원</strong> 남았습니다. 
                               현재 일 평균 소진 광고비(<strong>{formatNumber(Math.round(summary.totalCost / (campaigns.length > 0 ? expectedDays : 1)))}원</strong>) 기준으로 
                               약 <strong>{Math.max(0, Math.floor(bizmoneyBalance / (summary.totalCost / (campaigns.length > 0 ? expectedDays : 1) || 1)))}일 후</strong> 충전 잔액이 완전히 바닥나 네이버 광고 노출이 일제히 중단될 위기입니다. 지금 바로 비즈머니 충전을 진행해 주세요!
                             </p>
@@ -2032,27 +2371,41 @@ export default function Dashboard() {
                           ) : (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                               {anomalyFeed.map((feed, i) => (
-                                <div key={i} style={{
-                                  background: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') || feed.type.startsWith('ZERO') ? 'rgba(217, 70, 239, 0.05)' : 'rgba(244, 63, 94, 0.05)',
-                                  borderLeft: '4px solid',
-                                  borderLeftColor: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') || feed.type.startsWith('ZERO') ? 'var(--primary-rose)' : '#f43f5e',
-                                  padding: '12px 16px',
-                                  borderRadius: '0 8px 8px 0',
-                                  fontSize: '0.82rem',
-                                  lineHeight: '1.5'
-                                }}>
+                                <div key={i} 
+                                  className="insight-feed-card anomaly-card"
+                                  onClick={() => setSelectedAnomaly(feed)}
+                                  style={{
+                                    background: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') || feed.type.startsWith('ZERO') ? 'rgba(217, 70, 239, 0.05)' : 'rgba(244, 63, 94, 0.05)',
+                                    borderLeft: '4px solid',
+                                    borderLeftColor: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') || feed.type.startsWith('ZERO') ? 'var(--primary-rose)' : '#f43f5e',
+                                    padding: '14px 18px',
+                                    borderRadius: '0 8px 8px 0',
+                                    fontSize: '0.82rem',
+                                    lineHeight: '1.5',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.2s ease'
+                                  }}
+                                >
                                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
                                     <span style={{ fontWeight: 700, color: feed.type.startsWith('SURGE') || feed.type.startsWith('SPIKE') || feed.type.startsWith('ZERO') ? 'var(--primary-rose)' : '#f43f5e' }}>
-                                      {feed.type.startsWith('SURGE_COST') ? '⚡ 예산 급증 감지' 
-                                       : feed.type.startsWith('SURGE_PURCHASE') ? '⚡ 구매 전환수 폭발'
-                                       : feed.type.startsWith('SURGE_ROAS') ? '⚡ 광고 수익률(ROAS) 급증'
-                                       : feed.type.startsWith('SPIKE') ? '⚡ 트래픽 급증 감지' 
-                                       : feed.type.startsWith('ZERO_PURCHASE') ? '⚠️ 일일 구매 완료 0건 위기'
+                                      {feed.type === 'SURGE_COST' ? '⚡ 광고비 폭증 감지' 
+                                       : feed.type === 'DROP_COST' ? '⚠️ 광고 소진 급감'
+                                       : feed.type === 'SURGE_PURCHASE' ? '⚡ 구매 전환수 폭발'
+                                       : feed.type === 'DROP_PURCHASE' ? '⚠️ 구매 전환 급락'
+                                       : feed.type === 'SURGE_ROAS' ? '⚡ 광고 수익률(ROAS) 폭증'
+                                       : feed.type === 'DROP_ROAS' ? '⚠️ 광고 수익률(ROAS) 급락'
+                                       : feed.type === 'SURGE_CTR' ? '⚡ 클릭률(CTR) 폭증'
+                                       : feed.type === 'DROP_CTR' ? '⚠️ 클릭률(CTR) 급락'
+                                       : feed.type === 'SURGE_CRTO' ? '⚡ 전환율(CRTO) 폭증'
+                                       : feed.type === 'DROP_CRTO' ? '⚠️ 전환율(CRTO) 급락'
+                                       : feed.type === 'SPIKE_TRAFFIC' ? '⚡ 노출수 폭증 감지' 
+                                       : feed.type === 'ZERO_PURCHASE' ? '⚠️ 일일 구매 완료 0건 위기'
                                        : '⚠️ 지표 급감 (소진 위기)'}
                                     </span>
                                     <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', fontWeight: 600 }}>{feed.name}</span>
                                   </div>
-                                  <div dangerouslySetInnerHTML={{ __html: feed.message }} style={{ color: 'var(--text-primary)' }}></div>
+                                  <div dangerouslySetInnerHTML={{ __html: feed.message }} style={{ color: 'var(--text-primary)', marginBottom: '4px' }}></div>
+                                  <div style={{ fontSize: '0.7rem', color: 'var(--primary-cyan)', fontWeight: 600, textAlign: 'right' }}>🔍 대조 분석표 보기</div>
                                 </div>
                               ))}
                             </div>
@@ -2071,22 +2424,34 @@ export default function Dashboard() {
                           ) : (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                               {popFeed.map((feed, i) => (
-                                <div key={i} style={{
-                                  background: feed.type === 'TRAFFIC_GROWTH' ? 'rgba(16, 185, 129, 0.05)' : 'rgba(239, 68, 68, 0.05)',
-                                  borderLeft: '4px solid',
-                                  borderLeftColor: feed.type === 'TRAFFIC_GROWTH' ? 'var(--primary-emerald)' : '#ef4444',
-                                  padding: '12px 16px',
-                                  borderRadius: '0 8px 8px 0',
-                                  fontSize: '0.82rem',
-                                  lineHeight: '1.5'
-                                }}>
+                                <div key={i} 
+                                  className="insight-feed-card pop-card"
+                                  onClick={() => setSelectedAnomaly(feed)}
+                                  style={{
+                                    background: feed.type.includes('GROWTH') ? 'rgba(16, 185, 129, 0.05)' : 'rgba(239, 68, 68, 0.05)',
+                                    borderLeft: '4px solid',
+                                    borderLeftColor: feed.type.includes('GROWTH') ? 'var(--primary-emerald)' : '#ef4444',
+                                    padding: '14px 18px',
+                                    borderRadius: '0 8px 8px 0',
+                                    fontSize: '0.82rem',
+                                    lineHeight: '1.5',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.2s ease'
+                                  }}
+                                >
                                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                                    <span style={{ fontWeight: 700, color: feed.type === 'TRAFFIC_GROWTH' ? 'var(--primary-emerald)' : '#ef4444' }}>
-                                      {feed.type === 'TRAFFIC_GROWTH' ? '🔺 트래픽 활성화' : '🔻 트래픽 하락 추세'}
+                                    <span style={{ fontWeight: 700, color: feed.type.includes('GROWTH') ? 'var(--primary-emerald)' : '#ef4444' }}>
+                                      {feed.type === 'TRAFFIC_GROWTH' ? '🔺 트래픽 급상승' 
+                                       : feed.type === 'TRAFFIC_DECLINE' ? '🔻 트래픽 급락 추세'
+                                       : feed.type === 'COST_GROWTH' ? '🔺 광고비 급증'
+                                       : feed.type === 'COST_DECLINE' ? '🔻 광고비 급감'
+                                       : feed.type === 'PURCHASE_GROWTH' ? '🔺 구매 전환 폭증'
+                                       : '🔻 구매 전환 급락'}
                                     </span>
                                     <span style={{ fontSize: '0.75rem', fontWeight: 600 }}>{feed.name}</span>
                                   </div>
-                                  <div dangerouslySetInnerHTML={{ __html: feed.message }} style={{ color: 'var(--text-primary)' }}></div>
+                                  <div dangerouslySetInnerHTML={{ __html: feed.message }} style={{ color: 'var(--text-primary)', marginBottom: '4px' }}></div>
+                                  <div style={{ fontSize: '0.7rem', color: 'var(--primary-cyan)', fontWeight: 600, textAlign: 'right' }}>🔍 대조 분석표 보기</div>
                                 </div>
                               ))}
                             </div>
@@ -2177,7 +2542,7 @@ export default function Dashboard() {
                                     <td>{formatNumber(camp.clk_cnt)}</td>
                                     <td>{camp.ctr.toFixed(2)}%</td>
                                     <td>{formatNumber(Math.round(camp.cpc))}원</td>
-                                    <td style={{ fontWeight: 600, color: 'var(--primary-rose)' }}>{formatNumber(camp.sales_amt)}원</td>
+                                    <td style={{ fontWeight: 600, color: 'var(--primary-rose)' }}>{formatNumber(Math.round(camp.sales_amt))}원</td>
                                     <td style={{ fontWeight: 600, color: 'var(--primary-emerald)' }}>{formatNumber(camp.purchase_ccnt)}건</td>
                                     <td style={{ fontWeight: 600, color: 'var(--primary-emerald)' }}>{formatNumber(Math.round(camp.purchase_conv_amt))}원</td>
                                     <td style={{ fontWeight: 600, color: 'var(--primary-amber)' }}>
@@ -2511,6 +2876,121 @@ export default function Dashboard() {
       </main>
 
       {/* ========================================================
+         상세 대조 분석 팝업 모달
+         ======================================================== */}
+      {selectedAnomaly && (
+        <div className="modal-overlay" onClick={() => setSelectedAnomaly(null)}>
+          <div className="modal-card glass-panel" style={{ maxWidth: '600px', width: '95%', padding: '28px' }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <span style={{
+                  fontSize: '0.72rem',
+                  fontWeight: 800,
+                  color: 'var(--primary-cyan)',
+                  letterSpacing: '1px'
+                }}>
+                  {selectedAnomaly.periodInfo || '지표 상세 대조 분석'}
+                </span>
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 800, color: '#f8fafc', margin: 0 }}>
+                  📢 {selectedAnomaly.name} 상세 성과 대조표
+                </h3>
+              </div>
+              <button className="btn-modal-close" onClick={() => setSelectedAnomaly(null)}>×</button>
+            </div>
+
+            <div style={{ marginTop: '20px' }}>
+              <div style={{
+                background: 'rgba(15, 23, 42, 0.4)',
+                border: '1px solid var(--panel-border)',
+                borderRadius: '12px',
+                padding: '16px',
+                marginBottom: '20px',
+                fontSize: '0.82rem',
+                lineHeight: '1.6',
+                color: 'var(--text-secondary)'
+              }}>
+                <strong style={{ color: 'var(--text-primary)', display: 'block', marginBottom: '6px' }}>💡 AI 브리핑 분석 내용:</strong>
+                <span dangerouslySetInnerHTML={{ __html: selectedAnomaly.message }}></span>
+              </div>
+
+              <div className="table-container" style={{ maxHeight: 'none', overflow: 'visible', background: 'transparent' }}>
+                <table className="premium-table" style={{ width: '100%', fontSize: '0.85rem' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: 'left', padding: '10px' }}>성과 지표</th>
+                      <th style={{ textAlign: 'right', padding: '10px' }}>이전 기준 값</th>
+                      <th style={{ textAlign: 'right', padding: '10px' }}>현재 변경 값</th>
+                      <th style={{ textAlign: 'right', padding: '10px' }}>변동률</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedAnomaly.details && selectedAnomaly.details.map((detail: any, idx: number) => {
+                      const prevVal = detail.prev || 0;
+                      const curVal = detail.current || 0;
+                      
+                      let diffPercent = 0;
+                      if (prevVal > 0) {
+                        diffPercent = ((curVal - prevVal) / prevVal) * 100;
+                      } else if (prevVal === 0 && curVal > 0) {
+                        diffPercent = 100;
+                      }
+
+                      const isPositive = diffPercent > 0;
+                      const isZero = diffPercent === 0;
+
+                      // 소수점 완전히 버려 정수로 포맷
+                      const formattedPrev = detail.unit === '원' || detail.unit === '회' 
+                        ? formatNumber(Math.round(prevVal)) 
+                        : Math.round(prevVal);
+                      
+                      const formattedCur = detail.unit === '원' || detail.unit === '회' 
+                        ? formatNumber(Math.round(curVal)) 
+                        : Math.round(curVal);
+
+                      return (
+                        <tr key={idx} style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                          <td style={{ fontWeight: 600, padding: '10px', color: 'var(--text-primary)' }}>{detail.metric}</td>
+                          <td style={{ textAlign: 'right', padding: '10px', color: 'var(--text-secondary)' }}>
+                            {formattedPrev}{detail.unit}
+                          </td>
+                          <td style={{ textAlign: 'right', padding: '10px', fontWeight: 700, color: 'var(--text-primary)' }}>
+                            {formattedCur}{detail.unit}
+                          </td>
+                          <td style={{
+                            textAlign: 'right',
+                            padding: '10px',
+                            fontWeight: 700,
+                            color: isZero ? 'var(--text-secondary)' : isPositive ? 'var(--primary-rose)' : 'var(--primary-cyan)'
+                          }}>
+                            {isZero ? '-' : `${isPositive ? '+' : ''}${Math.round(diffPercent)}%`}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="modal-actions" style={{ marginTop: '24px' }}>
+              <button 
+                type="button" 
+                className="btn-premium" 
+                style={{
+                  background: 'linear-gradient(135deg, var(--primary-cyan), var(--primary-blue))',
+                  padding: '10px 24px',
+                  fontSize: '0.85rem'
+                }} 
+                onClick={() => setSelectedAnomaly(null)}
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
          비밀번호 변경 모달 팝업
          ======================================================== */}
       {showPasswordModal && (
@@ -2722,6 +3202,16 @@ export default function Dashboard() {
 
       {/* 글로벌 스타일 오버레이 모달 */}
       <style jsx global>{`
+        /* 인사이트 피드 카드 호버 효과 */
+        .insight-feed-card {
+          transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        }
+        .insight-feed-card:hover {
+          transform: translateX(4px) translateY(-1px);
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+          filter: brightness(1.15);
+        }
+
         /* 어드민 셀렉트 박스 */
         .admin-user-selector-container {
           margin-bottom: 24px;
