@@ -174,6 +174,9 @@ export default function Dashboard() {
   const [loadingAds, setLoadingAds] = useState<boolean>(false);
   const [syncingAccounts, setSyncingAccounts] = useState<boolean>(false);
   const [syncingCampaigns, setSyncingCampaigns] = useState<boolean>(false);
+  const [syncProgress, setSyncProgress] = useState<number>(0);
+  const [syncStage, setSyncStage] = useState<string>('');
+  const [syncMessage, setSyncMessage] = useState<string>('');
   
   // 검색 필터 상태
   const [accountSearchTerm, setAccountSearchTerm] = useState<string>('');
@@ -1407,7 +1410,7 @@ export default function Dashboard() {
     }
   };
 
-  // 5. 특정 광고주 지정 기간의 캠페인 및 광고그룹 통계 실시간 동기화
+  // 5. 특정 광고주 지정 기간의 캠페인 및 광고그룹 통계 실시간 동기화 (SSE 스트리밍 진행률 연동)
   const handleSyncCampaigns = async (customerId: string, syncSince?: string) => {
     if (!currentUser || !customerId) return;
     const filterUserId = currentUser.role === 'ADMIN' ? selectedUserFilter : currentUser.id;
@@ -1415,8 +1418,11 @@ export default function Dashboard() {
 
     try {
       setSyncingCampaigns(true);
+      setSyncProgress(0);
+      setSyncStage('INITIALIZE');
+      setSyncMessage('서버와 실시간 연결을 설정하는 중...');
+
       let url = `/api/sync/campaigns?customerId=${customerId}`;
-      
       const startSince = syncSince || since;
       if (syncSince || datePreset === 'custom') {
         url += `&since=${startSince}&until=${until}`;
@@ -1430,82 +1436,133 @@ export default function Dashboard() {
       }
 
       const response = await fetch(url, { method: 'POST' });
-      const result = await response.json();
       
-      if (result.success) {
-        // 동기화 완료 후 DB에서 다시 범위 데이터 쿼리 및 마스터 이름 정보 비동기 갱신
-        const [campData, adgData, adData] = await Promise.all([
-          supabaseFetchAll('campaign_stats', customerId, startSince, until, filterUserId),
-          supabaseFetchAll('adgroup_stats', customerId, startSince, until, filterUserId),
-          supabaseFetchAll('ad_stats', customerId, startSince, until, filterUserId)
-        ]);
+      if (!response.ok) {
+        throw new Error(`동기화 서버 연결에 실패했습니다. (HTTP ${response.status})`);
+      }
 
-        // 마스터 이름 캐시 최신화 (동기화 완료 후 비동기 호출)
-        fetchMasterNames(customerId);
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      
+      if (!reader) {
+        throw new Error('스트리밍 리더를 설정할 수 없습니다.');
+      }
 
-        // 메인 테이블 표시용으로 현재 날짜 범위에만 속하는 데이터 분리 필터링
-        const currentCampData = campData.filter(row => row.date >= since && row.date <= until);
-        const currentAdgData = adgData.filter(row => row.date >= since && row.date <= until);
-        const currentAdData = adData.filter(row => row.date >= since && row.date <= until);
+      let completeDetails: any = null;
+      let errorOccurred = false;
+      let errorMessage = '';
 
-        aggregateAndSetCampaigns(currentCampData);
-        aggregateAndSetAdgroups(currentAdgData);
-        aggregateAndSetAds(currentAdData);
-        
-        // AI 성능 변동 및 이상 징후 감지 엔진 실시간 구동 (전체 범위 데이터 및 동등 기간 전달)
-        const expectedDaysVal = Math.ceil(Math.abs(new Date(until).getTime() - new Date(since).getTime()) / (1000 * 60 * 60 * 24)) + 1;
-        
-        let calculatedPopSince: string;
-        let calculatedPopUntil: string;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
 
-        const sinceParts = since.split('-');
-        const sinceYear = parseInt(sinceParts[0], 10);
-        const sinceMonth = parseInt(sinceParts[1], 10);
-        const sinceDay = parseInt(sinceParts[2], 10);
+        const chunk = decoder.decode(value, { stream: true });
+        // EventStream은 "data: { ... }\n\n" 형식이 연속으로 내려오므로 분할 파싱
+        const lines = chunk.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              
+              if (data.error) {
+                errorOccurred = true;
+                errorMessage = data.error;
+                break;
+              }
 
-        const untilParts = until.split('-');
-        const untilYear = parseInt(untilParts[0], 10);
-        const untilMonth = parseInt(untilParts[1], 10);
-        const untilDay = parseInt(untilParts[2], 10);
+              if (data.progress !== undefined) {
+                setSyncProgress(data.progress);
+                setSyncStage(data.stage || '');
+                setSyncMessage(data.message || '');
+              }
 
-        if (sinceDay === 1) {
-          let prevYear = sinceYear;
-          let prevMonth = sinceMonth - 1;
-          if (prevMonth === 0) {
-            prevMonth = 12;
-            prevYear -= 1;
+              if (data.stage === 'COMPLETE' && data.success) {
+                completeDetails = data.details;
+              }
+            } catch (e) {
+              // 파싱 노이즈 예방
+            }
           }
+        }
+        if (errorOccurred) break;
+      }
 
-          const pad = (n: number) => String(n).padStart(2, '0');
-          calculatedPopSince = `${prevYear}-${pad(prevMonth)}-01`;
+      if (errorOccurred) {
+        throw new Error(errorMessage || '동기화 중 에러가 보고되었습니다.');
+      }
 
-          const lastDayOfPrevMonth = new Date(Date.UTC(prevYear, prevMonth, 0)).getUTCDate();
-          const targetUntilDay = Math.min(untilDay, lastDayOfPrevMonth);
-          calculatedPopUntil = `${prevYear}-${pad(prevMonth)}-${pad(targetUntilDay)}`;
-        } else {
-          const popSinceDate = new Date(new Date(since).getTime() - expectedDaysVal * 24 * 60 * 60 * 1000);
-          const popUntilDate = new Date(new Date(since).getTime() - 1 * 24 * 60 * 60 * 1000);
-          const formatDate = (d: Date) => {
-            const year = d.getUTCFullYear();
-            const month = String(d.getUTCMonth() + 1).padStart(2, '0');
-            const day = String(d.getUTCDate()).padStart(2, '0');
-            return `${year}-${month}-${day}`;
-          };
-          calculatedPopSince = formatDate(popSinceDate);
-          calculatedPopUntil = formatDate(popUntilDate);
+      // 동기화 완료 후 DB에서 다시 범위 데이터 쿼리 및 마스터 이름 정보 비동기 갱신
+      const [campData, adgData, adData] = await Promise.all([
+        supabaseFetchAll('campaign_stats', customerId, startSince, until, filterUserId),
+        supabaseFetchAll('adgroup_stats', customerId, startSince, until, filterUserId),
+        supabaseFetchAll('ad_stats', customerId, startSince, until, filterUserId)
+      ]);
+
+      // 마스터 이름 캐시 최신화 (동기화 완료 후 비동기 호출)
+      fetchMasterNames(customerId);
+
+      // 메인 테이블 표시용으로 현재 날짜 범위에만 속하는 데이터 분리 필터링
+      const currentCampData = campData.filter(row => row.date >= since && row.date <= until);
+      const currentAdgData = adgData.filter(row => row.date >= since && row.date <= until);
+      const currentAdData = adData.filter(row => row.date >= since && row.date <= until);
+
+      aggregateAndSetCampaigns(currentCampData);
+      aggregateAndSetAdgroups(currentAdgData);
+      aggregateAndSetAds(currentAdData);
+      
+      // AI 성능 변동 및 이상 징후 감지 엔진 실시간 구동 (전체 범위 데이터 및 동등 기간 전달)
+      const expectedDaysVal = Math.ceil(Math.abs(new Date(until).getTime() - new Date(since).getTime()) / (1000 * 60 * 60 * 24)) + 1;
+      
+      let calculatedPopSince: string;
+      let calculatedPopUntil: string;
+
+      const sinceParts = since.split('-');
+      const sinceYear = parseInt(sinceParts[0], 10);
+      const sinceMonth = parseInt(sinceParts[1], 10);
+      const sinceDay = parseInt(sinceParts[2], 10);
+
+      const untilParts = until.split('-');
+      const untilYear = parseInt(untilParts[0], 10);
+      const untilMonth = parseInt(untilParts[1], 10);
+      const untilDay = parseInt(untilParts[2], 10);
+
+      if (sinceDay === 1) {
+        let prevYear = sinceYear;
+        let prevMonth = sinceMonth - 1;
+        if (prevMonth === 0) {
+          prevMonth = 12;
+          prevYear -= 1;
         }
 
-        runInsightEngine(campData, adgData, adData, since, until, calculatedPopSince, calculatedPopUntil);
-        
-        // 광고주 리스트의 갱신 시각 업데이트
-        await fetchAccounts();
+        const pad = (n: number) => String(n).padStart(2, '0');
+        calculatedPopSince = `${prevYear}-${pad(prevMonth)}-01`;
+
+        const lastDayOfPrevMonth = new Date(Date.UTC(prevYear, prevMonth, 0)).getUTCDate();
+        const targetUntilDay = Math.min(untilDay, lastDayOfPrevMonth);
+        calculatedPopUntil = `${prevYear}-${pad(prevMonth)}-${pad(targetUntilDay)}`;
       } else {
-        alert(`캠페인, 광고그룹, 소재 동기화 실패: ${result.error}`);
+        const popSinceDate = new Date(new Date(since).getTime() - expectedDaysVal * 24 * 60 * 60 * 1000);
+        const popUntilDate = new Date(new Date(since).getTime() - 1 * 24 * 60 * 60 * 1000);
+        const formatDate = (d: Date) => {
+          const year = d.getUTCFullYear();
+          const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const day = String(d.getUTCDate()).padStart(2, '0');
+          return `${year}-${month}-${day}`;
+        };
+        calculatedPopSince = formatDate(popSinceDate);
+        calculatedPopUntil = formatDate(popUntilDate);
       }
+
+      runInsightEngine(campData, adgData, adData, since, until, calculatedPopSince, calculatedPopUntil);
+      
+      // 광고주 리스트의 갱신 시각 업데이트
+      await fetchAccounts();
+
     } catch (err: any) {
       alert(`동기화 중 오류 발생: ${err.message}`);
     } finally {
       setSyncingCampaigns(false);
+      setSyncProgress(0);
     }
   };
 
@@ -3335,8 +3392,83 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* ========================================================
+         실시간 동기화 진행 상태 표시 모달 (SSE 스트리밍 연동)
+         ======================================================== */}
+      {syncingCampaigns && (
+        <div className="modal-overlay" style={{ zIndex: 9999 }}>
+          <div className="modal-card glass-panel" style={{ maxWidth: '460px', width: '90%', padding: '32px', textAlign: 'center', boxShadow: '0 20px 50px rgba(0, 0, 0, 0.4)', border: '1px solid rgba(251, 146, 60, 0.3)' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px' }}>
+              <div className="sync-pulse-spinner" />
+              
+              <h3 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#f8fafc', margin: 0, letterSpacing: '-0.5px' }}>
+                광고주 성과 실시간 동기화 중
+              </h3>
+              
+              <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', margin: '0 0 10px 0', lineHeight: '1.5' }}>
+                네이버 광고 API 429 차단(Rate Limit) 방지를 위해<br />
+                지능형 백오프 딜레이를 적용하여 안전하게 데이터를 수집하고 있습니다.
+              </p>
+
+              <div style={{ fontSize: '3rem', fontWeight: 900, color: 'var(--primary-rose)', fontFamily: 'system-ui, sans-serif', textShadow: '0 0 20px rgba(244, 63, 94, 0.4)', margin: '10px 0' }}>
+                {syncProgress}%
+              </div>
+
+              <div style={{ width: '100%', height: '8px', background: 'rgba(255, 255, 255, 0.05)', borderRadius: '10px', overflow: 'hidden', border: '1px solid rgba(255, 255, 255, 0.08)' }}>
+                <div style={{
+                  width: `${syncProgress}%`,
+                  height: '100%',
+                  background: 'linear-gradient(90deg, var(--primary-rose), var(--primary-cyan))',
+                  borderRadius: '10px',
+                  transition: 'width 0.4s cubic-bezier(0.4, 0, 0.2, 1)',
+                  boxShadow: '0 0 10px rgba(244, 63, 94, 0.6)'
+                }} />
+              </div>
+
+              <div style={{ marginTop: '8px', width: '100%' }}>
+                <div style={{ fontSize: '0.72rem', fontWeight: 800, color: 'var(--primary-cyan)', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>
+                  {syncStage || 'INITIALIZE'}
+                </div>
+                <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-primary)', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                  {syncMessage || '동기화 연결을 시작하는 중...'}
+                </div>
+              </div>
+
+              <div style={{ fontSize: '0.7rem', color: 'rgba(255, 255, 255, 0.3)', marginTop: '16px', borderTop: '1px solid rgba(255, 255, 255, 0.05)', paddingTop: '12px', width: '100%' }}>
+                ⚠️ 동기화 도중 브라우저 창을 닫거나 새로고침하지 마세요.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 글로벌 스타일 오버레이 모달 */}
       <style jsx global>{`
+        /* 실시간 동기화 SSE 스피너 및 펄스 효과 */
+        @keyframes syncPulse {
+          0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.5); }
+          70% { transform: scale(1); box-shadow: 0 0 0 20px rgba(244, 63, 94, 0); }
+          100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(244, 63, 94, 0); }
+        }
+        .sync-pulse-spinner {
+          width: 56px;
+          height: 56px;
+          background: radial-gradient(circle, var(--primary-rose) 0%, rgba(244, 63, 94, 0.2) 100%);
+          border-radius: 50%;
+          animation: syncPulse 2s infinite;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .sync-pulse-spinner::after {
+          content: '🔄';
+          font-size: 1.6rem;
+          animation: spin 3s linear infinite;
+        }
+        @keyframes spin {
+          100% { transform: rotate(360deg); }
+        }
+
         /* 인사이트 피드 카드 호버 효과 */
         .insight-feed-card {
           transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
