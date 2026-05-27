@@ -385,6 +385,7 @@ export default function Dashboard() {
 
     const newAnomalyFeed: any[] = [];
     const newPopFeed: any[] = [];
+    const tempCampaignAnomalies: any[] = [];
 
     // --- A. 최근 1일 증분 이상 분석 (Latest Daily Increment Anomaly) ---
     const currentPeriodCamps = campRaw.filter(r => r.date >= expectedSince && r.date <= expectedUntil);
@@ -444,7 +445,8 @@ export default function Dashboard() {
         if (avgCost >= 10000) {
           const costRatio = curCost / avgCost;
           if (costRatio >= 2.0) {
-            newAnomalyFeed.push({
+            tempCampaignAnomalies.push({
+              campaignId: cid,
               type: 'SURGE_COST',
               level: 'CAMPAIGN',
               name: row.campaign_name,
@@ -454,7 +456,8 @@ export default function Dashboard() {
               periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
             });
           } else if (curCost <= avgCost * 0.15 && row.campaign_status === 'ELIGIBLE') {
-            newAnomalyFeed.push({
+            tempCampaignAnomalies.push({
+              campaignId: cid,
               type: 'DROP_COST',
               level: 'CAMPAIGN',
               name: row.campaign_name,
@@ -470,7 +473,8 @@ export default function Dashboard() {
         if (avgImp >= 500) {
           const impRatio = curImp / avgImp;
           if (impRatio >= 2.5) {
-            newAnomalyFeed.push({
+            tempCampaignAnomalies.push({
+              campaignId: cid,
               type: 'SPIKE_TRAFFIC',
               level: 'CAMPAIGN',
               name: row.campaign_name,
@@ -486,7 +490,8 @@ export default function Dashboard() {
         if (avgPurchaseCcnt >= 3.0) {
           const purchaseRatio = curPurchaseCcnt / avgPurchaseCcnt;
           if (purchaseRatio >= 2.0) {
-            newAnomalyFeed.push({
+            tempCampaignAnomalies.push({
+              campaignId: cid,
               type: 'SURGE_PURCHASE',
               level: 'CAMPAIGN',
               name: row.campaign_name,
@@ -496,7 +501,8 @@ export default function Dashboard() {
               periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
             });
           } else if (purchaseRatio <= 0.2) {
-            newAnomalyFeed.push({
+            tempCampaignAnomalies.push({
+              campaignId: cid,
               type: 'DROP_PURCHASE',
               level: 'CAMPAIGN',
               name: row.campaign_name,
@@ -507,7 +513,8 @@ export default function Dashboard() {
             });
           }
         } else if (avgPurchaseCcnt >= 3.0 && curPurchaseCcnt === 0 && priorDaysCount >= 3) {
-          newAnomalyFeed.push({
+          tempCampaignAnomalies.push({
+            campaignId: cid,
             type: 'ZERO_PURCHASE',
             level: 'CAMPAIGN',
             name: row.campaign_name,
@@ -522,7 +529,8 @@ export default function Dashboard() {
         if (avgRoas > 10 && avgCost >= 10000 && avgImp >= 500 && avgClk >= 10) {
           const roasRatio = curRoas / avgRoas;
           if (roasRatio >= 1.5) {
-            newAnomalyFeed.push({
+            tempCampaignAnomalies.push({
+              campaignId: cid,
               type: 'SURGE_ROAS',
               level: 'CAMPAIGN',
               name: row.campaign_name,
@@ -532,7 +540,8 @@ export default function Dashboard() {
               periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
             });
           } else if (roasRatio <= 0.3) {
-            newAnomalyFeed.push({
+            tempCampaignAnomalies.push({
+              campaignId: cid,
               type: 'DROP_ROAS',
               level: 'CAMPAIGN',
               name: row.campaign_name,
@@ -548,7 +557,8 @@ export default function Dashboard() {
         if (avgCtr > 0.1 && avgImp >= 500 && avgClk >= 30) {
           const ctrRatio = curCtr / avgCtr;
           if (ctrRatio >= 1.8) {
-            newAnomalyFeed.push({
+            tempCampaignAnomalies.push({
+              campaignId: cid,
               type: 'SURGE_CTR',
               level: 'CAMPAIGN',
               name: row.campaign_name,
@@ -558,7 +568,8 @@ export default function Dashboard() {
               periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
             });
           } else if (ctrRatio <= 0.4) {
-            newAnomalyFeed.push({
+            tempCampaignAnomalies.push({
+              campaignId: cid,
               type: 'DROP_CTR',
               level: 'CAMPAIGN',
               name: row.campaign_name,
@@ -574,7 +585,8 @@ export default function Dashboard() {
         if (avgCrto > 0.1 && avgClk >= 100 && avgPurchaseCcnt >= 5) {
           const crtoRatio = curCrto / avgCrto;
           if (crtoRatio >= 2.0) {
-            newAnomalyFeed.push({
+            tempCampaignAnomalies.push({
+              campaignId: cid,
               type: 'SURGE_CRTO',
               level: 'CAMPAIGN',
               name: row.campaign_name,
@@ -584,7 +596,8 @@ export default function Dashboard() {
               periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
             });
           } else if (crtoRatio <= 0.2) {
-            newAnomalyFeed.push({
+            tempCampaignAnomalies.push({
+              campaignId: cid,
               type: 'DROP_CRTO',
               level: 'CAMPAIGN',
               name: row.campaign_name,
@@ -596,6 +609,40 @@ export default function Dashboard() {
           }
         }
       });
+
+      // 캠페인별 Anomaly 중복 제거 및 우선순위 필터링 적용
+      const anomalyPriority: { [key: string]: number } = {
+        'ZERO_PURCHASE': 1,
+        'DROP_PURCHASE': 2,
+        'DROP_COST': 3,
+        'DROP_ROAS': 4,
+        'DROP_CTR': 5,
+        'DROP_CRTO': 6,
+        'SURGE_COST': 7,
+        'SURGE_PURCHASE': 8,
+        'SURGE_ROAS': 9,
+        'SURGE_CTR': 10,
+        'SURGE_CRTO': 11,
+        'SPIKE_TRAFFIC': 12
+      };
+
+      const groupedByCamp: { [key: string]: any[] } = {};
+      tempCampaignAnomalies.forEach(item => {
+        const key = item.campaignId;
+        if (!groupedByCamp[key]) groupedByCamp[key] = [];
+        groupedByCamp[key].push(item);
+      });
+
+      Object.keys(groupedByCamp).forEach(key => {
+        const list = groupedByCamp[key];
+        list.sort((a, b) => {
+          const scoreA = anomalyPriority[a.type] || 99;
+          const scoreB = anomalyPriority[b.type] || 99;
+          return scoreA - scoreB;
+        });
+        newAnomalyFeed.push(list[0]);
+      });
+
 
       // 광고그룹 Anomaly 감지
       const currentPeriodAdgs = adgRaw.filter(r => r.date >= expectedSince && r.date <= expectedUntil);
@@ -2928,10 +2975,14 @@ export default function Dashboard() {
                       const prevVal = detail.prev || 0;
                       const curVal = detail.current || 0;
                       
+                      // 화면에 보여줄 정수 반올림 값 계산
+                      const dispPrev = Math.round(prevVal);
+                      const dispCur = Math.round(curVal);
+                      
                       let diffPercent = 0;
-                      if (prevVal > 0) {
-                        diffPercent = ((curVal - prevVal) / prevVal) * 100;
-                      } else if (prevVal === 0 && curVal > 0) {
+                      if (dispPrev > 0) {
+                        diffPercent = ((dispCur - dispPrev) / dispPrev) * 100;
+                      } else if (dispPrev === 0 && dispCur > 0) {
                         diffPercent = 100;
                       }
 
@@ -2940,12 +2991,12 @@ export default function Dashboard() {
 
                       // 소수점 완전히 버려 정수로 포맷
                       const formattedPrev = detail.unit === '원' || detail.unit === '회' 
-                        ? formatNumber(Math.round(prevVal)) 
-                        : Math.round(prevVal);
+                        ? formatNumber(dispPrev) 
+                        : dispPrev;
                       
                       const formattedCur = detail.unit === '원' || detail.unit === '회' 
-                        ? formatNumber(Math.round(curVal)) 
-                        : Math.round(curVal);
+                        ? formatNumber(dispCur) 
+                        : dispCur;
 
                       return (
                         <tr key={idx} style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
