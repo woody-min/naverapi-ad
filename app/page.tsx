@@ -11,6 +11,7 @@ interface AdvertiserAccount {
   owner_naver_id: string;
   account_role: string;
   last_synced_at: string;
+  is_favorite?: boolean;
 }
 
 interface CampaignStat {
@@ -985,6 +986,31 @@ export default function Dashboard() {
     }
   };
 
+  // 주요 계정 즐겨찾기(⭐️ 토글) 핸들러 추가
+  const handleToggleFavorite = async (e: React.MouseEvent, customerId: string) => {
+    e.stopPropagation(); // 광고주 변경 이벤트 전파 방지
+    try {
+      const response = await fetch('/api/sync/favorite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customerId })
+      });
+      const result = await response.json();
+      if (result.success) {
+        // 로컬 상태 즉시 실시간 토글 업데이트
+        setAccounts(prev =>
+          prev.map(acc =>
+            acc.customer_id === customerId ? { ...acc, is_favorite: result.is_favorite } : acc
+          )
+        );
+      } else {
+        alert(result.error || '주요 계정 지정에 실패했습니다.');
+      }
+    } catch (err: any) {
+      alert('서버와 통신하는 도중 오류가 발생했습니다.');
+    }
+  };
+
   // 2-0. Supabase 1,000개 기본 페이지네이션 제한 우회용 전체 데이터 병렬 조회 헬퍼 (결과 보장을 위한 결정적 정렬 및 격리 적용)
   const supabaseFetchAll = async (
     table: string,
@@ -1898,12 +1924,39 @@ export default function Dashboard() {
                   onClick={() => {
                     setSelectedAccountId(acc.customer_id);
                   }}
+                  style={{ position: 'relative' }}
                 >
-                  <span className="account-name">{acc.ad_account_name}</span>
-                  <span className="account-id">고객 ID: {acc.customer_id}</span>
-                  <span className="account-sync-time">
-                    최근 갱신: {acc.last_synced_at ? new Date(acc.last_synced_at).toLocaleString('ko-KR', { hour12: false }) : '미동기화'}
-                  </span>
+                  <div style={{ paddingRight: '32px' }}>
+                    <span className="account-name">{acc.ad_account_name}</span>
+                    <span className="account-id">고객 ID: {acc.customer_id}</span>
+                    <span className="account-sync-time">
+                      최근 갱신: {acc.last_synced_at ? new Date(acc.last_synced_at).toLocaleString('ko-KR', { hour12: false }) : '미동기화'}
+                    </span>
+                  </div>
+                  
+                  {/* 별표 즐겨찾기 버튼 */}
+                  <button
+                    type="button"
+                    onClick={(e) => handleToggleFavorite(e, acc.customer_id)}
+                    style={{
+                      position: 'absolute',
+                      right: '12px',
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      fontSize: '1.2rem',
+                      padding: '4px',
+                      color: acc.is_favorite ? 'var(--primary-rose)' : 'rgba(255, 255, 255, 0.25)',
+                      textShadow: acc.is_favorite ? '0 0 8px rgba(244, 63, 94, 0.6)' : 'none',
+                      transition: 'all 0.2s ease',
+                      zIndex: 10
+                    }}
+                    title={acc.is_favorite ? "주요 계정 (매일 07:00 자동동기화)" : "주요 계정 지정하기"}
+                  >
+                    {acc.is_favorite ? '★' : '☆'}
+                  </button>
                 </div>
               ))
             )}
