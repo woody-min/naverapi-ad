@@ -132,7 +132,7 @@ function getKstDateRange(preset: string, sinceParam?: string | null, untilParam?
   };
 }
 
-// 범위 내 날짜 생성 유틸리티 (안전을 위해 최대 31일 제한)
+// 범위 내 날짜 생성 유틸리티 (요일 대칭보정 등으로 넓어진 구간 수집을 위해 최대 90일 한도 확장)
 function getDatesInRange(since: string, until: string): string[] {
   const dates: string[] = [];
   const start = new Date(since);
@@ -140,7 +140,7 @@ function getDatesInRange(since: string, until: string): string[] {
   
   const diffTime = Math.abs(end.getTime() - start.getTime());
   const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
-  const limitDays = Math.min(diffDays, 31);
+  const limitDays = Math.min(diffDays, 90);
   
   for (let i = 0; i < limitDays; i++) {
     const current = new Date(start.getTime() + (i * 24 * 60 * 60 * 1000));
@@ -150,6 +150,14 @@ function getDatesInRange(since: string, until: string): string[] {
     dates.push(`${year}-${month}-${day}`);
   }
   return dates;
+}
+
+// 네이버 통계 API의 NaN, Infinity 수집 수치 안전 정제 헬퍼 함수 (V3.12)
+function sanitizeFloat(val: any): number {
+  if (val === undefined || val === null) return 0.0;
+  const num = Number(val);
+  if (isNaN(num) || !isFinite(num)) return 0.0;
+  return num;
 }
 
 export async function POST(req: NextRequest) {
@@ -447,17 +455,17 @@ export async function POST(req: NextRequest) {
               daily_budget: camp.dailyBudget || null,
               imp_cnt: stat.impCnt || 0,
               clk_cnt: stat.clkCnt || 0,
-              ctr: stat.ctr || 0.0,
-              cpc: stat.cpc || 0.0,
+              ctr: sanitizeFloat(stat.ctr),
+              cpc: sanitizeFloat(stat.cpc),
               sales_amt: stat.salesAmt || 0,
               ccnt: stat.ccnt || 0,
-              crto: stat.crto || 0.0,
+              crto: sanitizeFloat(stat.crto),
               conv_amt: stat.convAmt || 0,
-              ror: stat.ror || 0.0,
-              cp_conv: stat.cpConv || 0.0,
+              ror: sanitizeFloat(stat.ror),
+              cp_conv: sanitizeFloat(stat.cpConv),
               purchase_ccnt: stat.purchaseCcnt || 0,
               purchase_conv_amt: stat.purchaseConvAmt || 0,
-              purchase_ror: stat.purchaseRor || 0.0,
+              purchase_ror: sanitizeFloat(stat.purchaseRor),
               synced_at: new Date().toISOString()
             });
           });
@@ -498,17 +506,17 @@ export async function POST(req: NextRequest) {
               bid_amt: adg.bidAmt || null,
               imp_cnt: stat.impCnt || 0,
               clk_cnt: stat.clkCnt || 0,
-              ctr: stat.ctr || 0.0,
-              cpc: stat.cpc || 0.0,
+              ctr: sanitizeFloat(stat.ctr),
+              cpc: sanitizeFloat(stat.cpc),
               sales_amt: stat.salesAmt || 0,
               ccnt: stat.ccnt || 0,
-              crto: stat.crto || 0.0,
+              crto: sanitizeFloat(stat.crto),
               conv_amt: stat.convAmt || 0,
-              ror: stat.ror || 0.0,
-              cp_conv: stat.cpConv || 0.0,
+              ror: sanitizeFloat(stat.ror),
+              cp_conv: sanitizeFloat(stat.cpConv),
               purchase_ccnt: stat.purchaseCcnt || 0,
               purchase_conv_amt: stat.purchaseConvAmt || 0,
-              purchase_ror: stat.purchaseRor || 0.0,
+              purchase_ror: sanitizeFloat(stat.purchaseRor),
               synced_at: new Date().toISOString()
             });
           });
@@ -555,17 +563,17 @@ export async function POST(req: NextRequest) {
               inspect_status: adItem.inspectStatus || 'UNKNOWN',
               imp_cnt: stat.impCnt || 0,
               clk_cnt: stat.clkCnt || 0,
-              ctr: stat.ctr || 0.0,
-              cpc: stat.cpc || 0.0,
+              ctr: sanitizeFloat(stat.ctr),
+              cpc: sanitizeFloat(stat.cpc),
               sales_amt: stat.salesAmt || 0,
               ccnt: stat.ccnt || 0,
-              crto: stat.crto || 0.0,
+              crto: sanitizeFloat(stat.crto),
               conv_amt: stat.convAmt || 0,
-              ror: stat.ror || 0.0,
-              cp_conv: stat.cpConv || 0.0,
+              ror: sanitizeFloat(stat.ror),
+              cp_conv: sanitizeFloat(stat.cpConv),
               purchase_ccnt: stat.purchaseCcnt || 0,
               purchase_conv_amt: stat.purchaseConvAmt || 0,
-              purchase_ror: stat.purchaseRor || 0.0,
+              purchase_ror: sanitizeFloat(stat.purchaseRor),
               synced_at: new Date().toISOString()
             });
           });

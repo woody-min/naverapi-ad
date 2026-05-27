@@ -180,6 +180,11 @@ export default function Dashboard() {
   const [syncProgress, setSyncProgress] = useState<number>(0);
   const [syncStage, setSyncStage] = useState<string>('');
   const [syncMessage, setSyncMessage] = useState<string>('');
+
+  // 지능형 데이터 누락 감지 배너(A안) 관련 상태
+  const [dbDistinctDatesCount, setDbDistinctDatesCount] = useState<number>(0);
+  const [showDataGapBanner, setShowDataGapBanner] = useState<boolean>(false);
+  const [dismissDataGapBanner, setDismissDataGapBanner] = useState<boolean>(false);
   
   // 검색 필터 상태
   const [accountSearchTerm, setAccountSearchTerm] = useState<string>('');
@@ -1130,6 +1135,13 @@ export default function Dashboard() {
     activeRequestRef.current = requestId;
 
     try {
+      // 새로운 조회 시작 즉시 이전 날짜의 데이터 잔상을 지워 UX 오해(오류 오인)를 방지합니다.
+      setCampaigns([]);
+      setAdgroups([]);
+      setAds([]);
+      setAnomalyFeed([]);
+      setPopFeed([]);
+
       setLoadingCampaigns(true);
       setLoadingAdgroups(true);
       setLoadingAds(true);
@@ -1217,6 +1229,18 @@ export default function Dashboard() {
         if (requestId !== activeRequestRef.current) {
           console.log('[Dashboard] 엇갈린 과거 비동기 조회 요청(fetch) 결과 드롭 처리 완료.');
           return;
+        }
+
+        // 현재 메인 조회 기간(since ~ until) 기준 DB에 실제로 들어있는 고유 날짜 수 계산
+        const activeDistinctDates = new Set(currentCampData.map(row => row.date));
+        const activeDistinctCount = activeDistinctDates.size;
+        setDbDistinctDatesCount(activeDistinctCount);
+
+        // 데이터가 듬성듬성 비어있는 상태 감지 (0개 초과 && 기대 일수보다 적음)
+        if (activeDistinctCount > 0 && activeDistinctCount < expectedDaysVal) {
+          setShowDataGapBanner(true);
+        } else {
+          setShowDataGapBanner(false);
         }
 
         aggregateAndSetCampaigns(currentCampData);
@@ -1578,6 +1602,10 @@ export default function Dashboard() {
 
       runInsightEngine(campData, adgData, adData, since, until, calculatedPopSince, calculatedPopUntil);
       
+      // 동기화가 성공 완료되었으므로 누락 감지 배너 및 차단 플래그 리셋
+      setShowDataGapBanner(false);
+      setDismissDataGapBanner(false);
+
       // 광고주 리스트의 갱신 시각 업데이트
       await fetchAccounts();
 
@@ -1587,6 +1615,43 @@ export default function Dashboard() {
       setSyncingCampaigns(false);
       setSyncProgress(0);
     }
+  };
+
+  // 지능형 누락 배너에서 호출하는 빠진 데이터 원클릭 스트리밍 동기화 함수 (V3.11)
+  const handleSyncGapData = () => {
+    if (!selectedAccountId) return;
+    const startDate = new Date(since);
+    const endDate = new Date(until);
+    const diffTime = Math.abs(endDate.getTime() - startDate.getTime());
+    const expectedDaysVal = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+
+    let popSince: string;
+
+    const sinceParts = since.split('-');
+    const sinceYear = parseInt(sinceParts[0], 10);
+    const sinceMonth = parseInt(sinceParts[1], 10);
+    const sinceDay = parseInt(sinceParts[2], 10);
+
+    if (sinceDay === 1) {
+      let prevYear = sinceYear;
+      let prevMonth = sinceMonth - 1;
+      if (prevMonth === 0) {
+        prevMonth = 12;
+        prevYear -= 1;
+      }
+      const pad = (n: number) => String(n).padStart(2, '0');
+      popSince = prevYear + '-' + pad(prevMonth) + '-01';
+    } else {
+      const popSinceDate = new Date(startDate.getTime() - 7 * 24 * 60 * 60 * 1000);
+      const formatDate = (d: Date) => {
+        const year = d.getUTCFullYear();
+        const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(d.getUTCDate()).padStart(2, '0');
+        return year + '-' + month + '-' + day;
+      };
+      popSince = formatDate(popSinceDate);
+    }
+    handleSyncCampaigns(selectedAccountId, popSince);
   };
 
   // 테이블 정렬 핸들러
@@ -1793,6 +1858,10 @@ export default function Dashboard() {
   useEffect(() => {
     if (selectedAccountId) {
       if (datePreset === 'custom' && (!appliedCustomSince || !appliedCustomUntil)) return;
+      
+      // 계정이나 날짜가 변경되었으므로 배너 숨김(X) 상태를 초기화합니다.
+      setDismissDataGapBanner(false);
+
       fetchCampaignAndAdGroupStats(selectedAccountId, true);
 
       // 날짜 일수 계산을 바탕으로 스마트 탭 스위칭 (1일 범위면 'campaign', 2일 이상 범위면 'briefing' 탭 활성화)
@@ -1917,6 +1986,9 @@ export default function Dashboard() {
         return sortOrder === 'asc' ? aNum - bNum : bNum - aNum;
       }
     });
+
+  // 지능형 누락 수집률 계산 (V3.11)
+  const gapPercentage = expectedDays > 0 ? Math.round((dbDistinctDatesCount / expectedDays) * 100) : 0;
 
   const formatNumber = (num: number) => new Intl.NumberFormat('ko-KR').format(num);
 
@@ -2377,6 +2449,38 @@ export default function Dashboard() {
              일반 성과분석 대시보드 화면
              ======================================================== */
           <>
+            {/* 지능형 데이터 누락 감지 경고 배너 (V3.11) - 로딩 중이 아닐 때만 노출 */}
+            {showDataGapBanner && !dismissDataGapBanner && !syncingCampaigns && !loadingCampaigns && !loadingAdgroups && !loadingAds && (
+              <div className="data-gap-warning-banner glass-panel">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexGrow: 1 }}>
+                  <span className="banner-icon">⚠️</span>
+                  <div className="banner-content" style={{ textAlign: 'left' }}>
+                    <h4 className="banner-title">데이터 연동 상태 일부 누락 감지 (수집률 {gapPercentage}%)</h4>
+                    <p className="banner-desc">
+                      선택하신 {expectedDays}일 기간 중 <strong>{expectedDays - dbDistinctDatesCount}일간의 광고 데이터</strong>가 DB에 연동되지 않았습니다. 
+                      실시간 API 동기화를 진행하여 정확한 광고 성과를 확인해 보세요!
+                    </p>
+                  </div>
+                </div>
+                <div className="banner-actions" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <button 
+                    onClick={handleSyncGapData}
+                    className="btn-premium btn-banner-sync"
+                  >
+                    ⚡ 빠진 데이터 즉시 채우기
+                  </button>
+                  <button 
+                    onClick={() => setDismissDataGapBanner(true)}
+                    className="btn-banner-close"
+                    
+                    title="임시 닫기"
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* 로딩/동기화 상태 */}
             {syncingCampaigns ? (
               <div className="loading-view glass-panel" style={{ background: 'rgba(6, 182, 212, 0.05)', borderColor: 'var(--primary-cyan)' }}>
@@ -2391,6 +2495,7 @@ export default function Dashboard() {
               </div>
             ) : (
               <>
+
                 {/* 3. 종합 요약 지표 카드 */}
                 <section className="stats-grid">
                   <div className="stat-card glass-panel">
@@ -3598,6 +3703,60 @@ export default function Dashboard() {
 
         .btn-sidebar-danger:hover {
           background: rgba(244, 63, 94, 0.15);
+        }
+
+        /* 지능형 데이터 누락 감지 배너 (V3.11) */
+        .data-gap-warning-banner {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 16px 24px;
+          background: rgba(251, 146, 60, 0.08) !important;
+          border: 1px solid rgba(251, 146, 60, 0.3) !important;
+          border-radius: 16px;
+          margin-bottom: 24px;
+          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2), 0 0 15px rgba(251, 146, 60, 0.1);
+          animation: bannerFadeIn 0.3s ease-out, bannerPulse 3s infinite alternate;
+          transition: all 0.3s ease;
+        }
+        @keyframes bannerFadeIn {
+          from { opacity: 0; transform: translateY(-10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes bannerPulse {
+          0% { border-color: rgba(251, 146, 60, 0.2); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2), 0 0 10px rgba(251, 146, 60, 0.05); }
+          100% { border-color: rgba(251, 146, 60, 0.45); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2), 0 0 20px rgba(251, 146, 60, 0.2); }
+        }
+        .banner-icon {
+          font-size: 1.6rem;
+        }
+        .banner-title {
+          font-size: 0.92rem;
+          font-weight: 800;
+          color: #ff9d5c;
+          margin: 0 0 4px 0;
+          letter-spacing: -0.3px;
+        }
+        .banner-desc {
+          font-size: 0.8rem;
+          color: var(--text-secondary);
+          margin: 0;
+          line-height: 1.5;
+        }
+        .banner-desc strong {
+          color: var(--text-primary);
+        }
+        .btn-banner-sync {
+          transition: all 0.25s ease !important;
+        }
+        .btn-banner-sync:hover {
+          transform: translateY(-1px);
+          box-shadow: 0 0 25px rgba(244, 63, 94, 0.6) !important;
+          filter: brightness(1.1);
+        }
+        .btn-banner-close:hover {
+          background: rgba(255, 255, 255, 0.15) !important;
+          color: var(--text-primary) !important;
         }
 
         /* 모달 팝업 오버레이 */
