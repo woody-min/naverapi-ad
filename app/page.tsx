@@ -1019,8 +1019,7 @@ export default function Dashboard() {
     table: string,
     customerId: string,
     since: string,
-    until: string,
-    userId: string
+    until: string
   ): Promise<any[]> => {
     let allData: any[] = [];
     let from = 0;
@@ -1036,7 +1035,6 @@ export default function Dashboard() {
         .from(table)
         .select('*')
         .eq('customer_id', customerId)
-        .eq('user_id', userId) // 멀티테넌트 격리 조건 강제
         .gte('date', since)
         .lte('date', until)
         .order('date', { ascending: true })
@@ -1058,8 +1056,7 @@ export default function Dashboard() {
     table: string,
     customerId: string,
     idField: string,
-    nameField: string,
-    userId: string
+    nameField: string
   ): Promise<any[]> => {
     let allData: any[] = [];
     let from = 0;
@@ -1070,7 +1067,6 @@ export default function Dashboard() {
         .from(table)
         .select(`${idField}, ${nameField}`)
         .eq('customer_id', customerId)
-        .eq('user_id', userId) // 멀티테넌트 격리 조건 강제
         .order(idField, { ascending: true })
         .range(from, from + batchSize - 1);
         
@@ -1092,8 +1088,8 @@ export default function Dashboard() {
 
     try {
       const [campNamesData, adgNamesData] = await Promise.all([
-        supabaseFetchNames('campaign_stats', customerId, 'campaign_id', 'campaign_name', filterUserId),
-        supabaseFetchNames('adgroup_stats', customerId, 'adgroup_id', 'adgroup_name', filterUserId)
+        supabaseFetchNames('campaign_stats', customerId, 'campaign_id', 'campaign_name'),
+        supabaseFetchNames('adgroup_stats', customerId, 'adgroup_id', 'adgroup_name')
       ]);
 
       if (campNamesData) {
@@ -1192,9 +1188,9 @@ export default function Dashboard() {
 
       // DB에서 popSince부터 until까지 전체 범위 데이터 병렬 조회 (페이지네이션, 정렬 및 격리 적용)
       const [allCampData, allAdgData, allAdData] = await Promise.all([
-        supabaseFetchAll('campaign_stats', customerId, popSince, until, filterUserId),
-        supabaseFetchAll('adgroup_stats', customerId, popSince, until, filterUserId),
-        supabaseFetchAll('ad_stats', customerId, popSince, until, filterUserId)
+        supabaseFetchAll('campaign_stats', customerId, popSince, until),
+        supabaseFetchAll('adgroup_stats', customerId, popSince, until),
+        supabaseFetchAll('ad_stats', customerId, popSince, until)
       ]);
 
       // 메인 테이블 표시용으로 현재 날짜 범위에만 속하는 데이터 분리 필터링
@@ -1496,9 +1492,9 @@ export default function Dashboard() {
 
       // 동기화 완료 후 DB에서 다시 범위 데이터 쿼리 및 마스터 이름 정보 비동기 갱신
       const [campData, adgData, adData] = await Promise.all([
-        supabaseFetchAll('campaign_stats', customerId, startSince, until, filterUserId),
-        supabaseFetchAll('adgroup_stats', customerId, startSince, until, filterUserId),
-        supabaseFetchAll('ad_stats', customerId, startSince, until, filterUserId)
+        supabaseFetchAll('campaign_stats', customerId, startSince, until),
+        supabaseFetchAll('adgroup_stats', customerId, startSince, until),
+        supabaseFetchAll('ad_stats', customerId, startSince, until)
       ]);
 
       // 마스터 이름 캐시 최신화 (동기화 완료 후 비동기 호출)
