@@ -220,6 +220,10 @@ export default function Dashboard() {
   });
   const [urgentAlerts, setUrgentAlerts] = useState<any[]>([]);
   
+  // V3.16.5: 전체 활성 광고주 수 클릭 시 목록 팝업 모달 상태 추가
+  const [showActiveAdvertisersModal, setShowActiveAdvertisersModal] = useState<boolean>(false);
+  const [activeSearchTerm, setActiveSearchTerm] = useState<string>('');
+  
   // 검색 필터 상태
   const [accountSearchTerm, setAccountSearchTerm] = useState<string>('');
   const [campaignSearchTerm, setCampaignSearchTerm] = useState<string>('');
@@ -3805,18 +3809,34 @@ export default function Dashboard() {
                   </div>
                 )}
 
-                {/* 2. 어제 하루 통합 메가 스코어보드 (오직 ADMIN일 때만 보안 노출!) */}
+                {/* 2. 어제 하루 통합 메가 스코어보드 (오직 ADMIN일 때만 보안 노출! 구매완료수/ROAS 전체합산 제외) */}
                 {currentUser?.role === 'ADMIN' && (
-                  <section className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
-                    <div className="stat-card glass-panel" style={{
-                      background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
-                      border: '1px solid rgba(6, 182, 212, 0.2)',
-                      boxShadow: '0 4px 20px rgba(6, 182, 212, 0.05)'
-                    }}>
+                  <section className="stats-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px' }}>
+                    <div 
+                      className="stat-card glass-panel" 
+                      onClick={() => setShowActiveAdvertisersModal(true)}
+                      style={{
+                        background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
+                        border: '1px solid rgba(6, 182, 212, 0.2)',
+                        boxShadow: '0 4px 20px rgba(6, 182, 212, 0.05)',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.transform = 'translateY(-2px)';
+                        e.currentTarget.style.borderColor = 'var(--primary-cyan)';
+                        e.currentTarget.style.boxShadow = '0 6px 24px rgba(6, 182, 212, 0.15)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.transform = 'none';
+                        e.currentTarget.style.borderColor = 'rgba(6, 182, 212, 0.2)';
+                        e.currentTarget.style.boxShadow = '0 4px 20px rgba(6, 182, 212, 0.05)';
+                      }}
+                    >
                       <span className="stat-label" style={{ color: 'var(--primary-cyan)' }}>🔗 전체 활성 광고주 수</span>
                       <span className="stat-value" style={{ color: '#ffffff' }}>{activeAdvertisers.length}개사</span>
                       <div className="stat-detail">
-                        <span>비활성/휴면 계정 제외</span>
+                        <span>비활성/휴면 계정 제외 (클릭 시 목록 팝업)</span>
                       </div>
                     </div>
 
@@ -3829,30 +3849,6 @@ export default function Dashboard() {
                       <span className="stat-value">{formatNumber(Math.round(megaSummary.totalCost))}원</span>
                       <div className="stat-detail">
                         <span>평균 CPC: <strong>{formatNumber(megaSummary.avgCpc)}원</strong></span>
-                      </div>
-                    </div>
-
-                    <div className="stat-card glass-panel emerald" style={{
-                      background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
-                      border: '1px solid rgba(16, 185, 129, 0.2)',
-                      boxShadow: '0 4px 20px rgba(16, 185, 129, 0.05)'
-                    }}>
-                      <span className="stat-label">🛒 어제 총 구매완료수</span>
-                      <span className="stat-value">{formatNumber(megaSummary.totalPurchaseCcnt)}건</span>
-                      <div className="stat-detail">
-                        <span>통합 클릭률: <strong>{megaSummary.avgCtr.toFixed(2)}%</strong></span>
-                      </div>
-                    </div>
-
-                    <div className="stat-card glass-panel amber" style={{
-                      background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
-                      border: '1px solid rgba(245, 158, 11, 0.2)',
-                      boxShadow: '0 4px 20px rgba(245, 158, 11, 0.05)'
-                    }}>
-                      <span className="stat-label">📈 어제 총 매출액 (전환)</span>
-                      <span className="stat-value">{formatNumber(Math.round(megaSummary.totalPurchaseConvAmt))}원</span>
-                      <div className="stat-detail">
-                        <span>통합 구매 ROAS: <strong>{megaSummary.avgRoas.toFixed(1)}%</strong></span>
                       </div>
                     </div>
                   </section>
@@ -4098,6 +4094,142 @@ export default function Dashboard() {
                   fontSize: '0.85rem'
                 }} 
                 onClick={() => setSelectedAnomaly(null)}
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
+         V3.16.5: 전체 활성 광고주 목록 팝업 모달
+         ======================================================== */}
+      {showActiveAdvertisersModal && (
+        <div className="modal-overlay" onClick={() => { setShowActiveAdvertisersModal(false); setActiveSearchTerm(''); }}>
+          <div className="modal-card glass-panel" style={{ maxWidth: '950px', width: '95%', padding: '28px', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header" style={{ flexShrink: 0 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <span style={{
+                  fontSize: '0.72rem',
+                  fontWeight: 800,
+                  color: 'var(--primary-cyan)',
+                  letterSpacing: '1px'
+                }}>
+                  ACTIVE ADVERTISERS LIST
+                </span>
+                <h3 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#f8fafc', margin: 0 }}>
+                  🔗 실시간 활성 광고주 목록 (총 {activeAdvertisers.length}개사)
+                </h3>
+              </div>
+              <button className="btn-modal-close" onClick={() => { setShowActiveAdvertisersModal(false); setActiveSearchTerm(''); }}>×</button>
+            </div>
+
+            {/* 검색 필터 */}
+            <div style={{ margin: '20px 0 12px 0', flexShrink: 0 }}>
+              <input
+                type="text"
+                placeholder="🔍 광고주명 또는 고객 ID 실시간 필터링..."
+                className="search-input"
+                style={{ width: '100%', fontSize: '0.85rem', padding: '10px 16px', background: 'rgba(15, 23, 42, 0.6)' }}
+                value={activeSearchTerm}
+                onChange={(e) => setActiveSearchTerm(e.target.value)}
+              />
+            </div>
+
+            {/* 광고주 테이블 리스트 */}
+            <div style={{ flexGrow: 1, overflowY: 'auto', marginTop: '10px', background: 'rgba(15, 23, 42, 0.2)', borderRadius: '12px', border: '1px solid var(--panel-border)' }}>
+              <table className="premium-table" style={{ width: '100%', fontSize: '0.82rem', borderCollapse: 'collapse' }}>
+                <thead style={{ position: 'sticky', top: 0, zIndex: 10, background: '#0f172a' }}>
+                  <tr>
+                    <th style={{ padding: '12px 16px', textAlign: 'left', color: 'var(--text-secondary)' }}>순위 / 광고주명</th>
+                    <th style={{ padding: '12px 16px', textAlign: 'left', color: 'var(--text-secondary)' }}>고객 ID</th>
+                    <th style={{ padding: '12px 16px', textAlign: 'right', color: 'var(--text-secondary)' }}>어제 소진 광고비</th>
+                    <th style={{ padding: '12px 16px', textAlign: 'right', color: 'var(--text-secondary)' }}>어제 구매완료수</th>
+                    <th style={{ padding: '12px 16px', textAlign: 'right', color: 'var(--text-secondary)' }}>어제 구매 ROAS</th>
+                    <th style={{ padding: '12px 16px', textAlign: 'right', color: 'var(--text-secondary)' }}>최근 30일 소진비</th>
+                    <th style={{ padding: '12px 16px', textAlign: 'center', color: 'var(--text-secondary)', width: '60px' }}>관제</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {activeAdvertisers
+                    .filter(acc => {
+                      const term = activeSearchTerm.toLowerCase();
+                      return acc.ad_account_name.toLowerCase().includes(term) || acc.customer_id.includes(term);
+                    })
+                    .map((acc, idx) => (
+                      <tr 
+                        key={acc.customer_id}
+                        onClick={() => {
+                          setSelectedAccountId(acc.customer_id);
+                          setShowActiveAdvertisersModal(false);
+                          setActiveSearchTerm('');
+                        }}
+                        style={{ 
+                          borderBottom: '1px solid rgba(255, 255, 255, 0.05)',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s ease'
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'rgba(255, 255, 255, 0.04)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = 'transparent';
+                        }}
+                      >
+                        <td style={{ padding: '12px 16px', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{
+                            display: 'inline-flex',
+                            width: '20px',
+                            height: '20px',
+                            background: idx === 0 ? 'rgba(245, 158, 11, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                            borderRadius: '50%',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '0.7rem',
+                            color: idx === 0 ? '#f59e0b' : 'var(--text-secondary)',
+                            border: idx === 0 ? '1px solid rgba(245, 158, 11, 0.3)' : '1px solid rgba(255,255,255,0.05)'
+                          }}>
+                            {idx + 1}
+                          </span>
+                          <span style={{ color: idx === 0 ? '#f8fafc' : '#e2e8f0' }}>{acc.ad_account_name}</span>
+                        </td>
+                        <td style={{ padding: '12px 16px', color: 'var(--text-secondary)', fontFamily: 'monospace' }}>{acc.customer_id}</td>
+                        <td style={{ padding: '12px 16px', textAlign: 'right', fontWeight: 700, color: 'var(--primary-rose)' }}>{formatNumber(Math.round(acc.yesterdayCost))}원</td>
+                        <td style={{ padding: '12px 16px', textAlign: 'right', fontWeight: 700, color: 'var(--primary-emerald)' }}>{formatNumber(acc.yesterdayPurchase)}건</td>
+                        <td style={{ padding: '12px 16px', textAlign: 'right', fontWeight: 700, color: 'var(--primary-amber)' }}>{acc.avgRoas.toFixed(1)}%</td>
+                        <td style={{ padding: '12px 16px', textAlign: 'right', color: '#ffffff', fontWeight: 600 }}>{formatNumber(Math.round(acc.total30Cost))}원</td>
+                        <td style={{ padding: '12px 16px', textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
+                          <button
+                            type="button"
+                            onClick={(e) => handleToggleFavorite(e, acc.customer_id)}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              cursor: 'pointer',
+                              fontSize: '1.1rem',
+                              padding: '2px',
+                              color: acc.is_favorite ? 'var(--primary-rose)' : 'rgba(255, 255, 255, 0.2)',
+                              textShadow: acc.is_favorite ? '0 0 6px rgba(244, 63, 94, 0.5)' : 'none',
+                              transition: 'all 0.15s ease'
+                            }}
+                            title={acc.is_favorite ? "주요 관제 지정 해제" : "주요 관제 지정"}
+                          >
+                            {acc.is_favorite ? '★' : '☆'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="modal-actions" style={{ marginTop: '20px', flexShrink: 0 }}>
+              <button 
+                type="button" 
+                className="btn-sidebar-secondary" 
+                style={{ width: 'auto', padding: '10px 24px', margin: 0 }}
+                onClick={() => { setShowActiveAdvertisersModal(false); setActiveSearchTerm(''); }}
               >
                 닫기
               </button>
