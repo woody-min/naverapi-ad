@@ -2409,9 +2409,40 @@ export default function Dashboard() {
       {/* 1. 사이드바 - 광고주 목록 */}
       <aside className="sidebar">
         <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 120px)' }}>
-          <div className="logo-section">
+          <div className="logo-section" onClick={() => setSelectedAccountId("")} style={{ cursor: 'pointer' }}>
             <div className="logo-icon">N</div>
             <div className="logo-text">Premium Adboard</div>
+          </div>
+
+          {/* 🏠 V3.16.4: 통합 마케팅 성과 포털 홈 복귀 메뉴 */}
+          <div 
+            className={`account-item ${selectedAccountId === "" ? 'active' : ''}`}
+            onClick={() => setSelectedAccountId("")}
+            style={{
+              margin: '0 8px 12px 8px',
+              padding: '12px 16px',
+              background: selectedAccountId === "" 
+                ? 'linear-gradient(135deg, rgba(6, 182, 212, 0.15) 0%, rgba(59, 130, 246, 0.15) 100%)' 
+                : 'rgba(30, 41, 59, 0.25)',
+              border: selectedAccountId === "" 
+                ? '1px solid var(--primary-cyan)' 
+                : '1px solid var(--panel-border)',
+              borderRadius: '12px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              transition: 'all 0.25s ease',
+              boxShadow: selectedAccountId === "" ? '0 0 15px rgba(6, 182, 212, 0.2)' : 'none'
+            }}
+          >
+            <span style={{ fontSize: '1.2rem', filter: selectedAccountId === "" ? 'drop-shadow(0 0 8px var(--primary-cyan))' : 'none' }}>🏠</span>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+              <span style={{ fontSize: '0.82rem', fontWeight: 800, color: '#f8fafc' }}>
+                {currentUser?.role === 'ADMIN' ? '통합 마케팅 성과 포털' : '주요 광고주 통합 홈'}
+              </span>
+              <span style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>전체 계정 모니터링 홈</span>
+            </div>
           </div>
 
           {/* ADMIN 전용 유저 선택 필터 */}
@@ -2568,12 +2599,46 @@ export default function Dashboard() {
                   ) 
                   : '네이버 검색광고 대시보드'}
             </h1>
-            <p className="dashboard-subtitle">
-              {activeTab === 'users'
-                ? '관리자 전용 사용자 계정 CRUD 및 개별 네이버 API Credentials 등록/수정 제어 패널'
-                : activeAccount 
-                  ? `고객 ID: ${activeAccount.customer_id} (권한: ${activeAccount.account_role})` 
-                  : '왼쪽 사이드바에서 광고주 계정을 선택하세요.'}
+            <p className="dashboard-subtitle" style={{ display: 'flex', alignItems: 'center', gap: '12px', justifyContent: 'space-between', width: '100%' }}>
+              <span>
+                {activeTab === 'users'
+                  ? '관리자 전용 사용자 계정 CRUD 및 개별 네이버 API Credentials 등록/수정 제어 패널'
+                  : activeAccount 
+                    ? `고객 ID: ${activeAccount.customer_id} (권한: ${activeAccount.account_role})` 
+                    : '왼쪽 사이드바에서 광고주 계정을 선택하세요.'}
+              </span>
+              {selectedAccountId && (
+                <button
+                  onClick={() => setSelectedAccountId("")}
+                  style={{
+                    background: 'rgba(6, 182, 212, 0.1)',
+                    border: '1px solid rgba(6, 182, 212, 0.3)',
+                    color: 'var(--primary-cyan)',
+                    padding: '4px 10px',
+                    borderRadius: '8px',
+                    fontSize: '0.72rem',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    transition: 'all 0.2s ease',
+                    boxShadow: '0 0 8px rgba(6, 182, 212, 0.1)'
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = 'rgba(6, 182, 212, 0.2)';
+                    e.currentTarget.style.borderColor = 'var(--primary-cyan)';
+                    e.currentTarget.style.boxShadow = '0 0 12px rgba(6, 182, 212, 0.3)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'rgba(6, 182, 212, 0.1)';
+                    e.currentTarget.style.borderColor = 'rgba(6, 182, 212, 0.3)';
+                    e.currentTarget.style.boxShadow = '0 0 8px rgba(6, 182, 212, 0.1)';
+                  }}
+                >
+                  ← 통합 포털 홈으로 복귀
+                </button>
+              )}
             </p>
           </div>
           
