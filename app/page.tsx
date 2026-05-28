@@ -1117,7 +1117,7 @@ export default function Dashboard() {
     }
   };
 
-  // V3.14: ADMIN 통합 포털 3단계용 데이터 일괄 수집 및 고속 판정 함수
+  // V3.16.2: ADMIN 및 일반 USER 겸용 통합 마케팅 성과 포털 데이터 수집 및 고속 판정 함수
   const fetchPortalData = async () => {
     if (accounts.length === 0) {
       console.log('⚠️ [DEBUG PORTAL] accounts가 0개이므로 포털 연산을 건너뜁니다.');
@@ -1129,9 +1129,26 @@ export default function Dashboard() {
     try {
       setPortalLoading(true);
       
-      // ⚡ V3.14.2: 최고 관리자(ADMIN)라도 최초 홈 포털 연산 시, 타사 마케터들의 계정을 빼고 오직 "로그인한 유저 본인(정태민 대표님)" 소유의 계정만 필터링하여 스코어보드 및 경보 보드를 산출!
-      const myAccounts = accounts.filter(a => a.user_id === currentUser?.id);
-      const targetAccounts = myAccounts.length > 0 ? myAccounts : accounts; // 혹시 본인 계정이 하나도 없으면 하위 호환을 위해 전체 노출
+      // ⚡ V3.16.0: 역할(ADMIN vs USER)에 따른 관제 타겟 광고주 격리 및 즐겨찾기 필터 적용
+      let targetAccounts = [];
+      
+      if (currentUser?.role === 'ADMIN') {
+        const myAccounts = accounts.filter(a => a.user_id === currentUser?.id);
+        targetAccounts = myAccounts.length > 0 ? myAccounts : accounts;
+      } else {
+        // 일반 유저(USER)인 경우: 본인 소유 계정 중 즐겨찾기(is_favorite === true)가 되어 있는 계정만 최대 3개 매핑
+        const favoriteAccounts = accounts.filter(a => a.is_favorite === true);
+        targetAccounts = favoriteAccounts.slice(0, 3);
+      }
+
+      if (targetAccounts.length === 0) {
+        console.log('⚠️ [DEBUG PORTAL] targetAccounts가 0개이므로 포털 연산을 건너뜁니다.');
+        setActiveAdvertisers([]);
+        setUrgentAlerts([]);
+        setPortalLoading(false);
+        return;
+      }
+
       const customerIds = targetAccounts.map(a => a.customer_id);
       
       const now = new Date();
@@ -1152,16 +1169,45 @@ export default function Dashboard() {
       console.log('=== 🔍 [DEBUG PORTAL START] ===');
       console.log('1. 현재 로그인 유저 (currentUser):', currentUser);
       console.log('2. 사이드바 전체 광고주 수 (accounts):', accounts.length);
-      console.log('3. 정태민 본인 매핑 광고주 수 (myAccounts):', myAccounts.length);
-      console.log('4. 최종 분석 타겟 광고주 수 (targetAccounts):', targetAccounts.length);
-      console.log('5. 분석 대상 customer_id 리스트:', customerIds);
-      console.log('6. 어제 기준 판정 날짜 (yesterdayStr):', yesterdayStr);
-      console.log('7. 30일 범위 시작 날짜 (since30DaysStr):', since30DaysStr);
+      console.log('3. 최종 분석 타겟 광고주 수 (targetAccounts):', targetAccounts.length);
+      console.log('4. 분석 대상 customer_id 리스트:', customerIds);
+      console.log('5. 어제 기준 판정 날짜 (yesterdayStr):', yesterdayStr);
+      console.log('6. 30일 범위 시작 날짜 (since30DaysStr):', since30DaysStr);
+
+      // ⚡ V3.16.2: 어제 하루치(yesterdayStr) 세부 지표(노출, 클릭, 구매수, 매출액)는 용량이 매우 작으므로(최대 500행 미만), 
+      // 1,000건 제한에 절대 막히지 않는 초고속 Direct Query로 가져와서 RPC 30일 소진비 결과와 결합(Join)합니다!
+      let yesterdayDetails: any[] = [];
+      try {
+        const { data: yData, error: yErr } = await supabase
+          .from('campaign_stats')
+          .select('customer_id, imp_cnt, clk_cnt, purchase_ccnt, purchase_conv_amt')
+          .eq('date', yesterdayStr)
+          .in('customer_id', customerIds);
+          
+        if (yErr) throw yErr;
+        yesterdayDetails = yData || [];
+        console.log(`7. DB에서 성공적으로 가져온 어제 세부 성과 행 개수: ${yesterdayDetails.length}건`);
+      } catch (err) {
+        console.error('⚠️ [DEBUG PORTAL] 어제 세부 데이터 로드 실패:', err);
+      }
+
+      // customer_id별 어제 세부 지표 합산 맵 구성
+      const yesterdayDetailMap: { [key: string]: { imp: number, clk: number, purchase: number, sales: number } } = {};
+      customerIds.forEach(cid => {
+        yesterdayDetailMap[cid] = { imp: 0, clk: 0, purchase: 0, sales: 0 };
+      });
+      
+      yesterdayDetails.forEach(item => {
+        if (yesterdayDetailMap[item.customer_id]) {
+          yesterdayDetailMap[item.customer_id].imp += (item.imp_cnt || 0);
+          yesterdayDetailMap[item.customer_id].clk += (item.clk_cnt || 0);
+          yesterdayDetailMap[item.customer_id].purchase += (item.purchase_ccnt || 0);
+          yesterdayDetailMap[item.customer_id].sales += (item.purchase_conv_amt || 0);
+        }
+      });
 
       // Supabase에서 30일간의 데이터를 각 광고주별로 병렬(Promise.all) 일괄 조회하여 PostgREST 1,000건 제한 원천 회피!
-      // ⚡ V3.15.1: iriskorea처럼 캠페인이 53개 이상인 대형 광고주는 30일치 데이터가 1,590건에 달해 1,000건 서버 하드 캡 한도에 잘려 나갑니다.
       // Supabase Stored Procedure (RPC)를 가동하여 37개 전체 광고주의 30일 광고비 합산 연산을 DB 서버 내부에서 0.001초 만에 종결!
-      // ⚡ V3.15.2: 캠페인이 200개든 2,000개든 상관없이, 대량의 행을 다운로드하지 않고 단 37줄의 집계 결과만 0.01초 만에 초고속 로드하여 1,000건 장벽을 영구 소멸시킵니다!
       let allCamps30Days: any[] = [];
       let errCamps: any = null;
 
@@ -1178,17 +1224,22 @@ export default function Dashboard() {
         // 기존 프론트엔드 합산 로직과의 대칭 호환성을 위해,
         // RPC 반환 결과인 [{ customer_id: "...", yesterday_cost: 745089, total_30day_cost: 18105944 }]를
         // 어제 성과용 로우(date = yesterdayStr)와 과거 29일 누계용 로우(date = 'PRIOR') 2개로 쪼개어 가공합니다!
-        // 이렇게 하면 기존의 복잡한 Yesterday Mega Summary 및 Anomaly Alert 집계 로직을 0% 수정하고 완벽 분리 작동시킵니다!
         const mappedRows: any[] = [];
         (data || []).forEach((row: any) => {
           const yesterdayVal = Number(row.yesterday_cost) || 0;
           const total30Val = Number(row.total_30day_cost) || 0;
           const priorVal = Math.max(0, total30Val - yesterdayVal);
+          
+          const details = yesterdayDetailMap[row.customer_id] || { imp: 0, clk: 0, purchase: 0, sales: 0 };
 
-          // 1) 어제 하루치 레코드
+          // 1) 어제 하루치 레코드 (노출, 클릭, 구매완료수, 매출액 100% 매핑 복원!)
           mappedRows.push({
             customer_id: row.customer_id,
             sales_amt: yesterdayVal,
+            imp_cnt: details.imp,
+            clk_cnt: details.clk,
+            purchase_ccnt: details.purchase,
+            purchase_conv_amt: details.sales,
             date: yesterdayStr
           });
           
@@ -1207,13 +1258,6 @@ export default function Dashboard() {
       if (errCamps) throw errCamps;
 
       console.log('8. DB에서 성공적으로 긁어온 30일 성과 행 개수 (allCamps30Days):', allCamps30Days?.length);
-
-      if (allCamps30Days && allCamps30Days.length > 0) {
-        console.log('🔍 [정밀 분석] 첫 번째 행의 date 타입과 실제 값:', typeof allCamps30Days[0].date, JSON.stringify(allCamps30Days[0].date));
-        
-        const distinctDates = Array.from(new Set(allCamps30Days.map(r => r.date)));
-        console.log('🔍 [정밀 분석] DB에서 긁어온 실제 날짜 종류들:', distinctDates);
-      }
 
       const statsMap: { [key: string]: any[] } = {};
       customerIds.forEach(cid => { statsMap[cid] = []; });
@@ -1259,7 +1303,7 @@ export default function Dashboard() {
         const priorDaysCount = Array.from(new Set(priorRows.map(r => r.date))).length || 1;
         const priorAvgCost = priorCostTotal / priorDaysCount;
 
-        // 3. 🚨 긴급 이상 징후 분석
+        // 3. 🚨 긴급 이상 징후 분석 (이제 테스터 USER도 본인 즐겨찾기에 한해 경보 혜택 제공!)
         if (priorAvgCost >= 10000) {
           if (yesterdayCost === 0) {
             alerts.push({
@@ -3573,7 +3617,7 @@ export default function Dashboard() {
           </>
         ) : (
           /* ========================================================
-             V3.14: [🏠 ADMIN 통합 마케팅 성과 포털] 화면 (selectedAccountId === "" 일 때)
+             V3.16.0: [🏠 통합 마케팅 성과 포털] 화면 (selectedAccountId === "" 일 때)
              ======================================================== */
           <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', width: '100%' }}>
             
@@ -3594,10 +3638,12 @@ export default function Dashboard() {
                   Unified Marketing Control Centre
                 </span>
                 <h2 style={{ fontSize: '1.6rem', fontWeight: 900, color: '#ffffff', margin: '4px 0 0 0', textShadow: '0 0 20px rgba(255,255,255,0.05)' }}>
-                  📊 ADMIN 통합 마케팅 성과 포털
+                  {currentUser?.role === 'ADMIN' ? '📊 ADMIN 통합 마케팅 성과 포털' : '⭐️ 주요 광고주 통합 성과 보드'}
                 </h2>
                 <p style={{ margin: '4px 0 0 0', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-                  최근 30일 무소진 휴면 계정을 제외한 실시간 활성 광고주들의 어제 하루 통합 지표를 관제합니다.
+                  {currentUser?.role === 'ADMIN' 
+                    ? '최근 30일 무소진 휴면 계정을 제외한 실시간 활성 광고주들의 어제 하루 통합 지표를 관제합니다.' 
+                    : '즐겨찾기(★) 등록된 광고주 계정의 성과를 실시간 관제합니다. (최대 3개)'}
                 </p>
               </div>
               <button
@@ -3631,7 +3677,7 @@ export default function Dashboard() {
               </div>
             ) : (
               <>
-                {/* 1. 🚨 긴급 점검 필요 광고주 경보 보드 (Urgent Anomaly Alerts) */}
+                {/* 1. 🚨 긴급 점검 필요 광고주 경보 보드 (Urgent Anomaly Alerts - USER는 본인의 즐겨찾기 기준 노출) */}
                 {urgentAlerts.length > 0 && (
                   <div className="glass-panel urgent-portal-alert-board" style={{
                     background: 'rgba(244, 63, 94, 0.04)',
@@ -3694,149 +3740,181 @@ export default function Dashboard() {
                   </div>
                 )}
 
-                {/* 2. 어제 하루 통합 메가 스코어보드 */}
-                <section className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
-                  <div className="stat-card glass-panel" style={{
-                    background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
-                    border: '1px solid rgba(6, 182, 212, 0.2)',
-                    boxShadow: '0 4px 20px rgba(6, 182, 212, 0.05)'
-                  }}>
-                    <span className="stat-label" style={{ color: 'var(--primary-cyan)' }}>🔗 전체 활성 광고주 수</span>
-                    <span className="stat-value" style={{ color: '#ffffff' }}>{activeAdvertisers.length}개사</span>
-                    <div className="stat-detail">
-                      <span>비활성/휴면 계정 제외</span>
+                {/* 2. 어제 하루 통합 메가 스코어보드 (오직 ADMIN일 때만 보안 노출!) */}
+                {currentUser?.role === 'ADMIN' && (
+                  <section className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
+                    <div className="stat-card glass-panel" style={{
+                      background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
+                      border: '1px solid rgba(6, 182, 212, 0.2)',
+                      boxShadow: '0 4px 20px rgba(6, 182, 212, 0.05)'
+                    }}>
+                      <span className="stat-label" style={{ color: 'var(--primary-cyan)' }}>🔗 전체 활성 광고주 수</span>
+                      <span className="stat-value" style={{ color: '#ffffff' }}>{activeAdvertisers.length}개사</span>
+                      <div className="stat-detail">
+                        <span>비활성/휴면 계정 제외</span>
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="stat-card glass-panel rose" style={{
-                    background: 'linear-gradient(135deg, rgba(244, 63, 94, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
-                    border: '1px solid rgba(244, 63, 94, 0.2)',
-                    boxShadow: '0 4px 20px rgba(244, 63, 94, 0.05)'
-                  }}>
-                    <span className="stat-label">💸 어제 총 소진 광고비</span>
-                    <span className="stat-value">{formatNumber(Math.round(megaSummary.totalCost))}원</span>
-                    <div className="stat-detail">
-                      <span>평균 CPC: <strong>{formatNumber(megaSummary.avgCpc)}원</strong></span>
+                    <div className="stat-card glass-panel rose" style={{
+                      background: 'linear-gradient(135deg, rgba(244, 63, 94, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
+                      border: '1px solid rgba(244, 63, 94, 0.2)',
+                      boxShadow: '0 4px 20px rgba(244, 63, 94, 0.05)'
+                    }}>
+                      <span className="stat-label">💸 어제 총 소진 광고비</span>
+                      <span className="stat-value">{formatNumber(Math.round(megaSummary.totalCost))}원</span>
+                      <div className="stat-detail">
+                        <span>평균 CPC: <strong>{formatNumber(megaSummary.avgCpc)}원</strong></span>
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="stat-card glass-panel emerald" style={{
-                    background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
-                    border: '1px solid rgba(16, 185, 129, 0.2)',
-                    boxShadow: '0 4px 20px rgba(16, 185, 129, 0.05)'
-                  }}>
-                    <span className="stat-label">🛒 어제 총 구매완료수</span>
-                    <span className="stat-value">{formatNumber(megaSummary.totalPurchaseCcnt)}건</span>
-                    <div className="stat-detail">
-                      <span>통합 클릭률: <strong>{megaSummary.avgCtr.toFixed(2)}%</strong></span>
+                    <div className="stat-card glass-panel emerald" style={{
+                      background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
+                      border: '1px solid rgba(16, 185, 129, 0.2)',
+                      boxShadow: '0 4px 20px rgba(16, 185, 129, 0.05)'
+                    }}>
+                      <span className="stat-label">🛒 어제 총 구매완료수</span>
+                      <span className="stat-value">{formatNumber(megaSummary.totalPurchaseCcnt)}건</span>
+                      <div className="stat-detail">
+                        <span>통합 클릭률: <strong>{megaSummary.avgCtr.toFixed(2)}%</strong></span>
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="stat-card glass-panel amber" style={{
-                    background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
-                    border: '1px solid rgba(245, 158, 11, 0.2)',
-                    boxShadow: '0 4px 20px rgba(245, 158, 11, 0.05)'
-                  }}>
-                    <span className="stat-label">📈 어제 총 매출액 (전환)</span>
-                    <span className="stat-value">{formatNumber(Math.round(megaSummary.totalPurchaseConvAmt))}원</span>
-                    <div className="stat-detail">
-                      <span>통합 구매 ROAS: <strong>{megaSummary.avgRoas.toFixed(1)}%</strong></span>
+                    <div className="stat-card glass-panel amber" style={{
+                      background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
+                      border: '1px solid rgba(245, 158, 11, 0.2)',
+                      boxShadow: '0 4px 20px rgba(245, 158, 11, 0.05)'
+                    }}>
+                      <span className="stat-label">📈 어제 총 매출액 (전환)</span>
+                      <span className="stat-value">{formatNumber(Math.round(megaSummary.totalPurchaseConvAmt))}원</span>
+                      <div className="stat-detail">
+                        <span>통합 구매 ROAS: <strong>{megaSummary.avgRoas.toFixed(1)}%</strong></span>
+                      </div>
                     </div>
-                  </div>
-                </section>
+                  </section>
+                )}
 
                 {/* 3. 소진비 정렬 Active 그리드 카드 보드 */}
                 <div style={{ marginTop: '12px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--panel-border)', paddingBottom: '12px', marginBottom: '20px' }}>
                     <h3 style={{ fontSize: '1rem', fontWeight: 800, color: '#f8fafc', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      📋 실시간 활성 광고주별 성과 관제 보드 (소진액 순 정렬)
+                      {currentUser?.role === 'ADMIN' 
+                        ? '📋 실시간 활성 광고주별 성과 관제 보드 (소진액 순 정렬)' 
+                        : '⭐️ 나의 주요 광고주 성과 현황 (소진액 순 정렬)'}
                     </h3>
-                    <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>총 {activeAdvertisers.length}개 활성 업체 노출</span>
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                      {currentUser?.role === 'ADMIN' 
+                        ? `총 ${activeAdvertisers.length}개 활성 업체 노출` 
+                        : `즐겨찾기 주요 ${activeAdvertisers.length}개 노출 (최대 3개)`}
+                    </span>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '20px' }}>
-                    {activeAdvertisers.map((acc, idx) => (
-                      <div
-                        key={acc.customer_id}
-                        onClick={() => setSelectedAccountId(acc.customer_id)}
-                        className="active-advertiser-portal-card"
-                        style={{
-                          background: 'rgba(30, 41, 59, 0.25)',
-                          border: '1px solid var(--panel-border)',
-                          borderRadius: '16px',
-                          padding: '20px',
-                          cursor: 'pointer',
-                          transition: 'all 0.25s ease',
-                          position: 'relative',
-                          overflow: 'hidden',
-                          textAlign: 'left'
-                        }}
-                      >
-                        <div style={{
-                          position: 'absolute',
-                          left: 0,
-                          top: 0,
-                          height: '4px',
-                          width: '100%',
-                          background: idx === 0 ? 'linear-gradient(90deg, #f59e0b, #eab308)' : 'linear-gradient(90deg, var(--primary-cyan), var(--primary-blue))'
-                        }} />
-                        
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
-                          <div>
-                            <h4 style={{ margin: 0, fontSize: '0.92rem', fontWeight: 800, color: '#f8fafc' }}>
-                              {idx === 0 && '👑 '}{acc.ad_account_name}
-                            </h4>
-                            <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>ID: {acc.customer_id}</span>
+                  {currentUser?.role !== 'ADMIN' && activeAdvertisers.length === 0 ? (
+                    /* ⭐️ 일반 유저(USER) 중 즐겨찾기가 한 개도 등록되지 않은 경우 다크 글래스모피즘 가이드 빈 뷰 표출 */
+                    <div className="empty-view glass-panel" style={{
+                      height: '280px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'center',
+                      alignItems: 'center',
+                      gap: '16px',
+                      background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.4) 0%, rgba(15, 23, 42, 0.6) 100%)',
+                      border: '1px solid var(--panel-border)',
+                      borderRadius: '20px',
+                      padding: '40px',
+                      textAlign: 'center',
+                      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.2)'
+                    }}>
+                      <div className="empty-icon" style={{ fontSize: '3rem', animation: 'pulse 2s infinite' }}>⭐️</div>
+                      <h3 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#f8fafc', margin: 0 }}>등록된 주요 관제 광고주가 없습니다</h3>
+                      <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-secondary)', maxWidth: '400px', lineHeight: '1.6' }}>
+                        왼쪽 사이드바의 광고주 목록에서 **별표(☆)를 클릭**하여 주요 관제 광고주로 등록해 보세요! 소진액 순 상위 **최대 3개**까지 여기에 실시간 성과 카드가 표출됩니다.
+                      </p>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '20px' }}>
+                      {activeAdvertisers.map((acc, idx) => (
+                        <div
+                          key={acc.customer_id}
+                          onClick={() => setSelectedAccountId(acc.customer_id)}
+                          className="active-advertiser-portal-card"
+                          style={{
+                            background: 'rgba(30, 41, 59, 0.25)',
+                            border: '1px solid var(--panel-border)',
+                            borderRadius: '16px',
+                            padding: '20px',
+                            cursor: 'pointer',
+                            transition: 'all 0.25s ease',
+                            position: 'relative',
+                            overflow: 'hidden',
+                            textAlign: 'left'
+                          }}
+                        >
+                          <div style={{
+                            position: 'absolute',
+                            left: 0,
+                            top: 0,
+                            height: '4px',
+                            width: '100%',
+                            background: idx === 0 ? 'linear-gradient(90deg, #f59e0b, #eab308)' : 'linear-gradient(90deg, var(--primary-cyan), var(--primary-blue))'
+                          }} />
+                          
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
+                            <div>
+                              <h4 style={{ margin: 0, fontSize: '0.92rem', fontWeight: 800, color: '#f8fafc' }}>
+                                {idx === 0 && '👑 '}{acc.ad_account_name}
+                              </h4>
+                              <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>ID: {acc.customer_id}</span>
+                            </div>
+                            <span style={{
+                              fontSize: '0.62rem',
+                              fontWeight: 800,
+                              color: 'var(--primary-cyan)',
+                              background: 'rgba(6, 182, 212, 0.1)',
+                              border: '1px solid rgba(6, 182, 212, 0.3)',
+                              padding: '2px 8px',
+                              borderRadius: '12px'
+                            }}>
+                              RANK {idx + 1}
+                            </span>
                           </div>
-                          <span style={{
-                            fontSize: '0.62rem',
-                            fontWeight: 800,
-                            color: 'var(--primary-cyan)',
-                            background: 'rgba(6, 182, 212, 0.1)',
-                            border: '1px solid rgba(6, 182, 212, 0.3)',
-                            padding: '2px 8px',
-                            borderRadius: '12px'
+
+                          {/* 수치 요약 */}
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid rgba(255,255,255,0.03)', paddingTop: '12px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>어제 소진 광고비:</span>
+                              <strong style={{ color: 'var(--primary-rose)' }}>{formatNumber(Math.round(acc.yesterdayCost))}원</strong>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>어제 구매완료수:</span>
+                              <strong style={{ color: 'var(--primary-emerald)' }}>{formatNumber(acc.yesterdayPurchase)}건</strong>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>어제 전환 매출액:</span>
+                              <strong style={{ color: '#ffffff' }}>{formatNumber(Math.round(acc.yesterdaySales))}원</strong>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
+                              <span style={{ color: 'var(--text-secondary)' }}>어제 구매 ROAS:</span>
+                              <strong style={{ color: 'var(--primary-amber)' }}>{acc.avgRoas.toFixed(1)}%</strong>
+                            </div>
+                          </div>
+
+                          <div style={{
+                            marginTop: '16px',
+                            paddingTop: '8px',
+                            borderTop: '1px dashed rgba(255,255,255,0.05)',
+                            fontSize: '0.7rem',
+                            color: 'var(--text-secondary)',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center'
                           }}>
-                            RANK {idx + 1}
-                          </span>
-                        </div>
-
-                        {/* 수치 요약 */}
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid rgba(255,255,255,0.03)', paddingTop: '12px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
-                            <span style={{ color: 'var(--text-secondary)' }}>어제 소진 광고비:</span>
-                            <strong style={{ color: 'var(--primary-rose)' }}>{formatNumber(Math.round(acc.yesterdayCost))}원</strong>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
-                            <span style={{ color: 'var(--text-secondary)' }}>어제 구매완료수:</span>
-                            <strong style={{ color: 'var(--primary-emerald)' }}>{formatNumber(acc.yesterdayPurchase)}건</strong>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
-                            <span style={{ color: 'var(--text-secondary)' }}>어제 전환 매출액:</span>
-                            <strong style={{ color: '#ffffff' }}>{formatNumber(Math.round(acc.yesterdaySales))}원</strong>
-                          </div>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
-                            <span style={{ color: 'var(--text-secondary)' }}>어제 구매 ROAS:</span>
-                            <strong style={{ color: 'var(--primary-amber)' }}>{acc.avgRoas.toFixed(1)}%</strong>
+                            <span>최근 30일 소진비: {formatNumber(Math.round(acc.total30Cost))}원</span>
+                            <span style={{ color: 'var(--primary-cyan)', fontWeight: 800 }}>대시보드 진입 →</span>
                           </div>
                         </div>
-
-                        <div style={{
-                          marginTop: '16px',
-                          paddingTop: '8px',
-                          borderTop: '1px dashed rgba(255,255,255,0.05)',
-                          fontSize: '0.7rem',
-                          color: 'var(--text-secondary)',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center'
-                        }}>
-                          <span>최근 30일 소진비: {formatNumber(Math.round(acc.total30Cost))}원</span>
-                          <span style={{ color: 'var(--primary-cyan)', fontWeight: 800 }}>대시보드 진입 →</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </>
             )}
