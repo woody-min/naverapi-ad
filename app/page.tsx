@@ -1604,13 +1604,10 @@ export default function Dashboard() {
       // DB에 이전 동등 기간 + 현재 기간을 아우르는 전체 고유 날짜 수 계산 (popSince ~ until 기준)
       const distinctDatesInDb = new Set(allCampData.map(row => row.date)).size;
 
-      // ⚡ V3.16.5: PoP(전월 동등 비교) 기간이 DB에 없는 오류로 인해 조회하려는 현재 메인 기간에 강제 동기화가 트리거되는 치명적 루프 해결
-      // 사용자가 실제로 '조회하고자 하는 날짜 범위(expectedDaysVal)'에 부합하는 날짜 개수가 DB에 완벽히 들어있다면 API 강제 동기화를 가동하지 않고 즉시 캐시 렌더링합니다!
-      const currentDistinctDates = new Set(currentCampData.map(row => row.date)).size;
-      const isCurrentDataComplete = currentDistinctDates >= expectedDaysVal;
-
-      if ((currentCampData.length === 0 || !isCurrentDataComplete) && forceSyncIfEmpty) {
-        console.log(`[Dashboard] DB 내 현재 조회 기간(${since} ~ ${until})의 데이터가 불완전함 (가져온 날짜 수: ${currentDistinctDates}/${expectedDaysVal}일). 실시간 동기화...`);
+      // ⚡ V3.16.5: 대표님의 기획 설계 정적 롤백 복원
+      // 개별 대시보드 진입 시, 이전 동등 비교 기간(PoP) 데이터가 DB에 없다면 당연히 실시간 API 동기화를 가동하여 전월 데이터까지 함께 미리 긁어오는 것이 맞습니다!
+      if ((allCampData.length === 0 || allAdgData.length === 0 || distinctDatesInDb < totalExpectedDays) && forceSyncIfEmpty) {
+        console.log(`[Dashboard] DB 내 이전 동등 기간 포함 범위(${popSince} ~ ${until})의 데이터가 불완전함 (가져온 날짜 수: ${distinctDatesInDb}/${totalExpectedDays}일). 실시간 동기화...`);
         await handleSyncCampaigns(customerId, popSince);
       } else {
         // 비동기 요청 엇갈림 검증 (B요청이 처리된 후 도착한 낡은 A요청 결과 버림)

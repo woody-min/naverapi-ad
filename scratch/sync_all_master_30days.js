@@ -133,7 +133,7 @@ async function syncAllMasterAccounts() {
   const forceCustomerId = process.argv[2];
   
   console.log(`========================================================================`);
-  console.log(`🌀 [AI 대표님 계정 전수 보정기] 30일치 데이터 전수 복구 작업 시작...`);
+  console.log(`🌀 [AI 대표님 계정 전수 보정기] 60일치 데이터 전수 복구 작업 시작...`);
   if (forceCustomerId) {
     console.log(`🎯 [강제 우선 보정 모드] customer_id: ${forceCustomerId} 만 타겟 수집합니다.`);
   }
@@ -155,10 +155,10 @@ async function syncAllMasterAccounts() {
   const secretKey = user.naver_secret_key;
   const managerCustomerId = user.naver_customer_id;
 
-  const since = '2026-04-28';
+  const since = '2026-03-29'; // V3.16.5: 30일이 아닌 전월 동등 비교(PoP) 기간까지 선적재하기 위해 60일치 범위로 전격 확장
   const until = '2026-05-27';
   const dateList = getDatesInRange(since, until);
-  console.log(`📅 대상 기간 Preset: ${since} ~ ${until} (30일치)`);
+  console.log(`📅 대상 기간 Preset: ${since} ~ ${until} (최근 60일치)`);
 
   // 2. 대표님 소속 모든 advertiser_accounts 조회 및 loaded_days 연산 (고유 날짜 카운트로 정확하게 계산)
   console.log('⏳ 대표님 소속 광고 계정 리스트 및 적재 일수 정밀 체크 중...');
@@ -194,7 +194,7 @@ async function syncAllMasterAccounts() {
 
     const distinctDays = stats ? new Set(stats.map(s => s.date)).size : 0;
     
-    if (distinctDays < 30 || forceCustomerId) {
+    if (distinctDays < 60 || forceCustomerId) {
       targetAccounts.push({
         customer_id: acc.customer_id,
         ad_account_name: acc.ad_account_name,
@@ -203,10 +203,10 @@ async function syncAllMasterAccounts() {
     }
   }
 
-  console.log(`\n📢 30일치 광고비가 온전하지 않은 [구멍 난 계정] 총 ${targetAccounts.length}개 발견!`);
+  console.log(`\n📢 60일치 광고비가 온전하지 않은 [구멍 난 계정] 총 ${targetAccounts.length}개 발견!`);
   
   if (targetAccounts.length === 0) {
-    console.log('🎉 모든 계정이 이미 30일 완전 적재 상태입니다. 작업을 조기 완료합니다.');
+    console.log('🎉 모든 계정이 이미 60일 완전 적재 상태입니다. 작업을 조기 완료합니다.');
     return;
   }
 
@@ -522,7 +522,7 @@ async function syncAllMasterAccounts() {
         .update({ last_synced_at: new Date().toISOString() })
         .eq('customer_id', cid);
 
-      console.log(`🎉 [보정 성공] ${name} 계정이 30일 완전 적재 상태로 복구되었습니다!`);
+      console.log(`🎉 [보정 성공] ${name} 계정이 60일 완전 적재 상태로 복구되었습니다!`);
 
       // 다음 계정 수집 전 1초 휴식 (네이버 API Rate Limit 방지)
       await delay(1000);
@@ -533,7 +533,7 @@ async function syncAllMasterAccounts() {
   }
 
   console.log(`\n\n========================================================================`);
-  console.log(`🎉 [AI 복구 완료] 모든 구멍 뚫린 계정들의 30일치 데이터 복구 프로세스가 완전히 종료되었습니다!`);
+  console.log(`🎉 [AI 복구 완료] 모든 구멍 뚫린 계정들의 60일치 데이터 복구 프로세스가 완전히 종료되었습니다!`);
   console.log(`========================================================================`);
 }
 
