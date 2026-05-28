@@ -1300,8 +1300,8 @@ export default function Dashboard() {
         const yesterdaySales = yesterdayRows.reduce((s, r) => s + (r.purchase_conv_amt || 0), 0);
 
         const priorCostTotal = priorRows.reduce((s, r) => s + (r.sales_amt || 0), 0);
-        const priorDaysCount = Array.from(new Set(priorRows.map(r => r.date))).length || 1;
-        const priorAvgCost = priorCostTotal / priorDaysCount;
+        // ⚡ V3.16.3: RPC 호출 시 과거 29일치 광고비가 단일 'PRIOR' 행으로 축약되므로, 실제 일평균을 구하기 위해 29일로 나누어 줍니다!
+        const priorAvgCost = priorCostTotal / 29;
 
         // 3. 🚨 긴급 이상 징후 분석 (이제 테스터 USER도 본인 즐겨찾기에 한해 경보 혜택 제공!)
         if (priorAvgCost >= 10000) {
