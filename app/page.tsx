@@ -11,7 +11,14 @@ interface AdvertiserAccount {
   owner_naver_id: string;
   account_role: string;
   last_synced_at: string;
+  user_id?: string; // 💡 멀티테넌트 연동 식별값 주입
   is_favorite?: boolean;
+  daily_min_cost?: number;
+  daily_min_imp?: number;
+  daily_min_purchase?: number;
+  period_min_cost?: number;
+  period_min_imp?: number;
+  period_min_purchase?: number;
 }
 
 interface CampaignStat {
@@ -185,6 +192,33 @@ export default function Dashboard() {
   const [dbDistinctDatesCount, setDbDistinctDatesCount] = useState<number>(0);
   const [showDataGapBanner, setShowDataGapBanner] = useState<boolean>(false);
   const [dismissDataGapBanner, setDismissDataGapBanner] = useState<boolean>(false);
+
+  // AI 브리핑 임계값 커스텀 설정 및 % 스캐닝 연산 관련 상태 (V3.13)
+  const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
+  const [dailyMinCost, setDailyMinCost] = useState<number>(10000);
+  const [dailyMinImp, setDailyMinImp] = useState<number>(500);
+  const [dailyMinPurchase, setDailyMinPurchase] = useState<number>(3.0);
+  const [periodMinCost, setPeriodMinCost] = useState<number>(30000);
+  const [periodMinImp, setPeriodMinImp] = useState<number>(500);
+  const [periodMinPurchase, setPeriodMinPurchase] = useState<number>(10.0);
+  const [savingSettings, setSavingSettings] = useState<boolean>(false);
+  const [updatingBriefingFeed, setUpdatingBriefingFeed] = useState<boolean>(false);
+  const [briefingUpdateProgress, setBriefingUpdateProgress] = useState<number>(0);
+
+  // V3.14: ADMIN 통합 포털 3단계용 상태 변수
+  const [portalLoading, setPortalLoading] = useState<boolean>(false);
+  const [activeAdvertisers, setActiveAdvertisers] = useState<any[]>([]);
+  const [megaSummary, setMegaSummary] = useState<any>({
+    totalCost: 0,
+    totalImp: 0,
+    totalClk: 0,
+    totalPurchaseCcnt: 0,
+    totalPurchaseConvAmt: 0,
+    avgCtr: 0,
+    avgCpc: 0,
+    avgRoas: 0
+  });
+  const [urgentAlerts, setUrgentAlerts] = useState<any[]>([]);
   
   // 검색 필터 상태
   const [accountSearchTerm, setAccountSearchTerm] = useState<string>('');
@@ -379,6 +413,84 @@ export default function Dashboard() {
     }
   };
 
+  // V3.13: 브리핑 임계값 설정 모달 열기 및 값 매핑 핸들러
+  const handleOpenSettingsModal = () => {
+    if (!activeAccount) return;
+    setDailyMinCost(activeAccount.daily_min_cost !== undefined && activeAccount.daily_min_cost !== null ? activeAccount.daily_min_cost : 10000);
+    setDailyMinImp(activeAccount.daily_min_imp !== undefined && activeAccount.daily_min_imp !== null ? activeAccount.daily_min_imp : 500);
+    setDailyMinPurchase(activeAccount.daily_min_purchase !== undefined && activeAccount.daily_min_purchase !== null ? Number(activeAccount.daily_min_purchase) : 3.0);
+    setPeriodMinCost(activeAccount.period_min_cost !== undefined && activeAccount.period_min_cost !== null ? activeAccount.period_min_cost : 30000);
+    setPeriodMinImp(activeAccount.period_min_imp !== undefined && activeAccount.period_min_imp !== null ? activeAccount.period_min_imp : 500);
+    setPeriodMinPurchase(activeAccount.period_min_purchase !== undefined && activeAccount.period_min_purchase !== null ? Number(activeAccount.period_min_purchase) : 10.0);
+    setShowSettingsModal(true);
+  };
+
+  // V3.13: 브리핑 임계값 기본값으로 리셋 핸들러
+  const handleResetSettings = () => {
+    setDailyMinCost(10000);
+    setDailyMinImp(500);
+    setDailyMinPurchase(3.0);
+    setPeriodMinCost(30000);
+    setPeriodMinImp(500);
+    setPeriodMinPurchase(10.0);
+  };
+
+  // V3.13: 브리핑 임계값 Supabase 저장 및 AI 진행률 재연산 연출 핸들러
+  const handleSaveSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedAccountId) return;
+    
+    try {
+      setSavingSettings(true);
+      
+      const { error } = await supabase
+        .from('advertiser_accounts')
+        .update({
+          daily_min_cost: dailyMinCost,
+          daily_min_imp: dailyMinImp,
+          daily_min_purchase: dailyMinPurchase,
+          period_min_cost: periodMinCost,
+          period_min_imp: periodMinImp,
+          period_min_purchase: periodMinPurchase
+        })
+        .eq('customer_id', selectedAccountId);
+
+      if (error) throw error;
+
+      // Supabase 데이터 최신화
+      await fetchAccounts();
+
+      // 모달을 즉시 닫고 AI 스캐닝 연산 오버레이(%) 실행
+      setShowSettingsModal(false);
+      setUpdatingBriefingFeed(true);
+      setBriefingUpdateProgress(0);
+
+      // 0% ~ 100% 진행도 인터벌 연출
+      let progress = 0;
+      const interval = setInterval(() => {
+        progress += Math.floor(Math.random() * 8) + 8; // 8% ~ 15% 씩 랜덤 증가
+        if (progress >= 100) {
+          progress = 100;
+          setBriefingUpdateProgress(100);
+          clearInterval(interval);
+          
+          // 100% 완료 후 약간의 딜레이 뒤 오버레이를 닫고 데이터 재계산
+          setTimeout(() => {
+            setUpdatingBriefingFeed(false);
+            fetchCampaignAndAdGroupStats(selectedAccountId, false);
+          }, 600);
+        } else {
+          setBriefingUpdateProgress(progress);
+        }
+      }, 150);
+
+    } catch (err: any) {
+      alert(`설정 저장 중 오류가 발생했습니다: ${err.message}`);
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
   // C-3. AI 인사이트 및 Anomaly 연산 엔진
   const runInsightEngine = (
     campRaw: any[],
@@ -394,6 +506,14 @@ export default function Dashboard() {
       setPopFeed([]);
       return;
     }
+
+    // 광고주별 커스텀 임계값 바인딩 (V3.13) - 없거나 null이면 기존 기본값 백업 작동
+    const minDailyCost = activeAccount?.daily_min_cost !== undefined && activeAccount.daily_min_cost !== null ? activeAccount.daily_min_cost : 10000;
+    const minDailyImp = activeAccount?.daily_min_imp !== undefined && activeAccount.daily_min_imp !== null ? activeAccount.daily_min_imp : 500;
+    const minDailyPurchase = activeAccount?.daily_min_purchase !== undefined && activeAccount.daily_min_purchase !== null ? Number(activeAccount.daily_min_purchase) : 3.0;
+    const minPeriodCost = activeAccount?.period_min_cost !== undefined && activeAccount.period_min_cost !== null ? activeAccount.period_min_cost : 30000;
+    const minPeriodImp = activeAccount?.period_min_imp !== undefined && activeAccount.period_min_imp !== null ? activeAccount.period_min_imp : 500;
+    const minPeriodPurchase = activeAccount?.period_min_purchase !== undefined && activeAccount.period_min_purchase !== null ? Number(activeAccount.period_min_purchase) : 10.0;
 
     const newAnomalyFeed: any[] = [];
     const newPopFeed: any[] = [];
@@ -454,7 +574,7 @@ export default function Dashboard() {
         ];
 
         // 1. 광고비 변동 감지
-        if (avgCost >= 10000) {
+        if (avgCost >= minDailyCost) {
           const costRatio = curCost / avgCost;
           if (costRatio >= 2.0) {
             tempCampaignAnomalies.push({
@@ -482,7 +602,7 @@ export default function Dashboard() {
         }
 
         // 2. 트래픽(노출수) 변동 감지
-        if (avgImp >= 500) {
+        if (avgImp >= minDailyImp) {
           const impRatio = curImp / avgImp;
           if (impRatio >= 2.5) {
             tempCampaignAnomalies.push({
@@ -499,7 +619,7 @@ export default function Dashboard() {
         }
 
         // 3. 구매 전환수 급증/급감 감지
-        if (avgPurchaseCcnt >= 3.0) {
+        if (avgPurchaseCcnt >= minDailyPurchase) {
           const purchaseRatio = curPurchaseCcnt / avgPurchaseCcnt;
           if (purchaseRatio >= 2.0) {
             tempCampaignAnomalies.push({
@@ -524,7 +644,7 @@ export default function Dashboard() {
               periodInfo: `이전 일 평균 대비 ${latestDate} 하루 성과`
             });
           }
-        } else if (avgPurchaseCcnt >= 3.0 && curPurchaseCcnt === 0 && priorDaysCount >= 3) {
+        } else if (avgPurchaseCcnt >= minDailyPurchase && curPurchaseCcnt === 0 && priorDaysCount >= 3) {
           tempCampaignAnomalies.push({
             campaignId: cid,
             type: 'ZERO_PURCHASE',
@@ -538,7 +658,7 @@ export default function Dashboard() {
         }
 
         // 4. 광고수익률(ROAS) 급증/급감 감지
-        if (avgRoas > 10 && avgCost >= 10000 && avgImp >= 500 && avgClk >= 10) {
+        if (avgRoas > 10 && avgCost >= minDailyCost && avgImp >= minDailyImp && avgClk >= 10) {
           const roasRatio = curRoas / avgRoas;
           if (roasRatio >= 1.5) {
             tempCampaignAnomalies.push({
@@ -566,7 +686,7 @@ export default function Dashboard() {
         }
 
         // 5. 클릭률(CTR) 급증/급감 감지 (추가)
-        if (avgCtr > 0.1 && avgImp >= 500 && avgClk >= 30) {
+        if (avgCtr > 0.1 && avgImp >= minDailyImp && avgClk >= 30) {
           const ctrRatio = curCtr / avgCtr;
           if (ctrRatio >= 1.8) {
             tempCampaignAnomalies.push({
@@ -691,7 +811,7 @@ export default function Dashboard() {
            { metric: '클릭률(CTR)', prev: Math.round(avgAdgCtr * 100) / 100, current: Math.round(curAdgCtr * 100) / 100, unit: '%' }
          ];
 
-         if (avgAdgCost >= 10000 && curAdgCost <= avgAdgCost * 0.05 && row.adgroup_status === 'ELIGIBLE') {
+         if (avgAdgCost >= minDailyCost && curAdgCost <= avgAdgCost * 0.05 && row.adgroup_status === 'ELIGIBLE') {
           newAnomalyFeed.push({
             type: 'DROP_COST_ADGROUP',
             level: 'ADGROUP',
@@ -765,7 +885,7 @@ export default function Dashboard() {
         ];
 
         // 1. 노출수 변동 비율 감지
-        if (prevImp >= 500) {
+        if (prevImp >= minPeriodImp) {
           const changeRatio = (curImp - prevImp) / prevImp;
           if (Math.abs(changeRatio) >= 0.25) {
             tempCampaignPops.push({
@@ -783,7 +903,7 @@ export default function Dashboard() {
         }
 
         // 2. 광고비 변동 비율 감지
-        if (prevCost >= 30000) {
+        if (prevCost >= minPeriodCost) {
           const changeRatio = (curCost - prevCost) / prevCost;
           if (Math.abs(changeRatio) >= 0.3) {
             tempCampaignPops.push({
@@ -801,7 +921,7 @@ export default function Dashboard() {
         }
 
         // 3. 구매완료수 변동 감지
-        if (prevPurchaseCcnt >= 10) {
+        if (prevPurchaseCcnt >= minPeriodPurchase) {
           const changeRatio = (curPurchaseCcnt - prevPurchaseCcnt) / prevPurchaseCcnt;
           if (Math.abs(changeRatio) >= 0.3) {
             tempCampaignPops.push({
@@ -994,6 +1114,187 @@ export default function Dashboard() {
       console.error('Error fetching accounts:', err.message);
     } finally {
       setLoadingAccounts(false);
+    }
+  };
+
+  // V3.14: ADMIN 통합 포털 3단계용 데이터 일괄 수집 및 고속 판정 함수
+  const fetchPortalData = async () => {
+    if (accounts.length === 0) {
+      console.log('⚠️ [DEBUG PORTAL] accounts가 0개이므로 포털 연산을 건너뜁니다.');
+      setActiveAdvertisers([]);
+      setUrgentAlerts([]);
+      return;
+    }
+
+    try {
+      setPortalLoading(true);
+      
+      // ⚡ V3.14.2: 최고 관리자(ADMIN)라도 최초 홈 포털 연산 시, 타사 마케터들의 계정을 빼고 오직 "로그인한 유저 본인(정태민 대표님)" 소유의 계정만 필터링하여 스코어보드 및 경보 보드를 산출!
+      const myAccounts = accounts.filter(a => a.user_id === currentUser?.id);
+      const targetAccounts = myAccounts.length > 0 ? myAccounts : accounts; // 혹시 본인 계정이 하나도 없으면 하위 호환을 위해 전체 노출
+      const customerIds = targetAccounts.map(a => a.customer_id);
+      
+      const now = new Date();
+      const kstNow = new Date(now.getTime() + (9 * 60 * 60 * 1000));
+      const yesterday = new Date(kstNow.getTime() - (24 * 60 * 60 * 1000));
+      const formatDate = (d: Date) => {
+        const year = d.getUTCFullYear();
+        const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(d.getUTCDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+      };
+      
+      const yesterdayStr = formatDate(yesterday);
+      const since30Days = new Date(yesterday.getTime() - (29 * 24 * 60 * 60 * 1000));
+      const since30DaysStr = formatDate(since30Days);
+
+      // 🔍 [정밀 디버깅 로그 작동]
+      console.log('=== 🔍 [DEBUG PORTAL START] ===');
+      console.log('1. 현재 로그인 유저 (currentUser):', currentUser);
+      console.log('2. 사이드바 전체 광고주 수 (accounts):', accounts.length);
+      console.log('3. 정태민 본인 매핑 광고주 수 (myAccounts):', myAccounts.length);
+      console.log('4. 최종 분석 타겟 광고주 수 (targetAccounts):', targetAccounts.length);
+      console.log('5. 분석 대상 customer_id 리스트:', customerIds);
+      console.log('6. 어제 기준 판정 날짜 (yesterdayStr):', yesterdayStr);
+      console.log('7. 30일 범위 시작 날짜 (since30DaysStr):', since30DaysStr);
+
+      // Supabase에서 30일간의 데이터를 단 한번에 일괄 조회 (IN 쿼리 사용)
+      // ⚡ V3.14.4: 1,000건 디폴트 조회 한도를 5,000건으로 확장하고 최신순 정렬을 보장하여 어제 자 데이터가 유실되지 않도록 완벽 보강!
+      const { data: allCamps30Days, error: errCamps } = await supabase
+        .from('campaign_stats')
+        .select('*')
+        .in('customer_id', customerIds)
+        .gte('date', since30DaysStr)
+        .lte('date', yesterdayStr)
+        .order('date', { ascending: false }) // 최신 날짜 최우선 로드 보장
+        .limit(5000); // 1,000건 한계 전격 돌파
+
+      if (errCamps) throw errCamps;
+
+      console.log('8. DB에서 성공적으로 긁어온 30일 성과 행 개수 (allCamps30Days):', allCamps30Days?.length);
+
+      if (allCamps30Days && allCamps30Days.length > 0) {
+        console.log('🔍 [정밀 분석] 첫 번째 행의 date 타입과 실제 값:', typeof allCamps30Days[0].date, JSON.stringify(allCamps30Days[0].date));
+        
+        const distinctDates = Array.from(new Set(allCamps30Days.map(r => r.date)));
+        console.log('🔍 [정밀 분석] DB에서 긁어온 실제 날짜 종류들:', distinctDates);
+      }
+
+      const statsMap: { [key: string]: any[] } = {};
+      customerIds.forEach(cid => { statsMap[cid] = []; });
+      
+      if (allCamps30Days) {
+        allCamps30Days.forEach(row => {
+          if (statsMap[row.customer_id]) {
+            statsMap[row.customer_id].push(row);
+          }
+        });
+      }
+
+      const activeList: any[] = [];
+      const alerts: any[] = [];
+
+      let megaCost = 0;
+      let megaImp = 0;
+      let megaClk = 0;
+      let megaPurchase = 0;
+      let megaSales = 0;
+
+      targetAccounts.forEach(acc => {
+        const rows = statsMap[acc.customer_id] || [];
+        if (rows.length === 0) return;
+
+        // 1. 최근 30일 총 광고소진비 계산
+        const total30Cost = rows.reduce((s, r) => s + (r.sales_amt || 0), 0);
+        
+        // 최근 30일 소진이 0원인 광고주는 무소진 휴면 계정으로 판단하여 집계/그리드에서 제외
+        if (total30Cost === 0) return;
+
+        // 2. 어제 성과와 직전 29일 성과 분리 집계
+        const yesterdayRows = rows.filter(r => r.date === yesterdayStr);
+        const priorRows = rows.filter(r => r.date !== yesterdayStr);
+
+        const yesterdayCost = yesterdayRows.reduce((s, r) => s + (r.sales_amt || 0), 0);
+        const yesterdayImp = yesterdayRows.reduce((s, r) => s + (r.imp_cnt || 0), 0);
+        const yesterdayClk = yesterdayRows.reduce((s, r) => s + (r.clk_cnt || 0), 0);
+        const yesterdayPurchase = yesterdayRows.reduce((s, r) => s + (r.purchase_ccnt || 0), 0);
+        const yesterdaySales = yesterdayRows.reduce((s, r) => s + (r.purchase_conv_amt || 0), 0);
+
+        const priorCostTotal = priorRows.reduce((s, r) => s + (r.sales_amt || 0), 0);
+        const priorDaysCount = Array.from(new Set(priorRows.map(r => r.date))).length || 1;
+        const priorAvgCost = priorCostTotal / priorDaysCount;
+
+        // 3. 🚨 긴급 이상 징후 분석
+        if (priorAvgCost >= 10000) {
+          if (yesterdayCost === 0) {
+            alerts.push({
+              ad_account_name: acc.ad_account_name,
+              customer_id: acc.customer_id,
+              type: 'ZERO',
+              message: `평소 일 평균 **${formatNumber(Math.round(priorAvgCost))}원**을 소진하던 우량 업체이나, 어제 광고비 소진이 **0원**에 그쳐 완전히 중단(Zero)되었습니다! 긴급 점검이 필요합니다.`
+            });
+          } else {
+            const costRatio = yesterdayCost / priorAvgCost;
+            if (costRatio >= 2.0) {
+              alerts.push({
+                ad_account_name: acc.ad_account_name,
+                customer_id: acc.customer_id,
+                type: 'SURGE',
+                message: `어제 광고 소진비가 평소(일 평균 ${formatNumber(Math.round(priorAvgCost))}원) 대비 **${((costRatio - 1) * 100).toFixed(0)}% 급증**한 **${formatNumber(Math.round(yesterdayCost))}원**에 달해 예산 폭증 경보가 발령되었습니다.`
+              });
+            } else if (costRatio <= 0.15) {
+              alerts.push({
+                ad_account_name: acc.ad_account_name,
+                customer_id: acc.customer_id,
+                type: 'DROP',
+                message: `어제 광고 소진비가 평소(일 평균 ${formatNumber(Math.round(priorAvgCost))}원) 대비 **${((1 - costRatio) * 100).toFixed(0)}% 급감**한 **${formatNumber(Math.round(yesterdayCost))}원**에 그쳐 노출 누락 또는 이상이 우려됩니다.`
+              });
+            }
+          }
+        }
+
+        // 4. 메가 합산 적립
+        megaCost += yesterdayCost;
+        megaImp += yesterdayImp;
+        megaClk += yesterdayClk;
+        megaPurchase += yesterdayPurchase;
+        megaSales += yesterdaySales;
+
+        activeList.push({
+          ...acc,
+          yesterdayCost,
+          yesterdayImp,
+          yesterdayClk,
+          yesterdayPurchase,
+          yesterdaySales,
+          total30Cost,
+          avgCtr: yesterdayImp > 0 ? (yesterdayClk / yesterdayImp) * 100 : 0,
+          avgCpc: yesterdayClk > 0 ? Math.round(yesterdayCost / yesterdayClk) : 0,
+          avgRoas: yesterdayCost > 0 ? (yesterdaySales / yesterdayCost) * 100 : 0
+        });
+      });
+
+      // 5. 메가 서머리 계산
+      setMegaSummary({
+        totalCost: megaCost,
+        totalImp: megaImp,
+        totalClk: megaClk,
+        totalPurchaseCcnt: megaPurchase,
+        totalPurchaseConvAmt: megaSales,
+        avgCtr: megaImp > 0 ? (megaClk / megaImp) * 100 : 0,
+        avgCpc: megaClk > 0 ? Math.round(megaCost / megaClk) : 0,
+        avgRoas: megaCost > 0 ? (megaSales / megaCost) * 100 : 0
+      });
+
+      // 소진 광고비 내림차순 정렬
+      activeList.sort((a, b) => b.yesterdayCost - a.yesterdayCost);
+      setActiveAdvertisers(activeList);
+      setUrgentAlerts(alerts);
+
+    } catch (err: any) {
+      console.error('[Dashboard Portal] fetchPortalData 에러:', err.message);
+    } finally {
+      setPortalLoading(false);
     }
   };
 
@@ -1854,6 +2155,13 @@ export default function Dashboard() {
     }
   }, [currentUser, selectedUserFilter]);
 
+  // V3.14: selectedAccountId가 없고 accounts가 로드되었을 때 통합 포털 데이터 호출
+  useEffect(() => {
+    if (currentUser && !selectedAccountId && accounts.length > 0) {
+      fetchPortalData();
+    }
+  }, [currentUser, selectedAccountId, accounts]);
+
   // 선택된 계정, 날짜 프리셋 또는 커스텀 날짜 범위가 바뀔 때마다 캠페인, 광고그룹, 소재 데이터를 갱신
   useEffect(() => {
     if (selectedAccountId) {
@@ -2651,6 +2959,52 @@ export default function Dashboard() {
                   {activeTab === 'briefing' ? (
                     /* ⚡ V3 신규: AI 1차 성과 브리핑 및 이상 징후 피드 화면 */
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', marginTop: '20px' }}>
+                      {/* V3.13 브리핑 안내 및 커스텀 설정 제어부 */}
+                      <div style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        background: 'rgba(15, 23, 42, 0.4)',
+                        border: '1px solid var(--panel-border)',
+                        borderRadius: '16px',
+                        padding: '16px 24px',
+                        gap: '16px',
+                        flexWrap: 'wrap'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                          <span style={{ fontSize: '1.5rem' }}>🤖</span>
+                          <div style={{ textAlign: 'left' }}>
+                            <h4 style={{ margin: 0, fontSize: '0.9rem', fontWeight: 800, color: '#f8fafc' }}>
+                              광고주별 AI 모니터링 엔진 임계값 필터링 가동 중
+                            </h4>
+                            <p style={{ margin: '2px 0 0 0', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                              현재 설정: 일일 [비용 {formatNumber(dailyMinCost)}원 | 노출 {formatNumber(dailyMinImp)}회 | 구매 {dailyMinPurchase}건] &amp; 
+                              기간 [비용 {formatNumber(periodMinCost)}원 | 노출 {formatNumber(periodMinImp)}회 | 구매 {periodMinPurchase}건]
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          onClick={handleOpenSettingsModal}
+                          className="btn-premium"
+                          style={{
+                            background: 'rgba(6, 182, 212, 0.15)',
+                            border: '1px solid var(--primary-cyan)',
+                            color: 'var(--primary-cyan)',
+                            boxShadow: '0 0 10px rgba(6, 182, 212, 0.15)',
+                            padding: '8px 16px',
+                            fontSize: '0.8rem',
+                            fontWeight: 700,
+                            borderRadius: '10px',
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            transition: 'var(--transition-smooth)'
+                          }}
+                        >
+                          ⚙️ 브리핑 임계값 설정
+                        </button>
+                      </div>
                       {/* 비즈머니 충전 경고 카드 */}
                       {bizmoneyBalance !== null && (bizmoneyBalance <= 50000 || (summary.totalCost > 0 && bizmoneyBalance < (summary.totalCost / (campaigns.length > 0 ? expectedDays : 1)) * 2)) && (
                         <div className="glass-panel" style={{
@@ -3183,10 +3537,274 @@ export default function Dashboard() {
             )}
           </>
         ) : (
-          <div className="empty-view glass-panel" style={{ flexGrow: 1 }}>
-            <div className="empty-icon">👈</div>
-            <h2 style={{ fontSize: '1.2rem', fontWeight: 600 }}>광고주 계정을 선택해 주세요.</h2>
-            <p className="empty-text">사이드바에서 조회할 광고주 계정을 클릭하면 실시간 데이터가 자동으로 로드됩니다.</p>
+          /* ========================================================
+             V3.14: [🏠 ADMIN 통합 마케팅 성과 포털] 화면 (selectedAccountId === "" 일 때)
+             ======================================================== */
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', width: '100%' }}>
+            
+            <div className="portal-hero-section" style={{
+              background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.4) 0%, rgba(15, 23, 42, 0.6) 100%)',
+              border: '1px solid var(--panel-border)',
+              borderRadius: '20px',
+              padding: '24px 32px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: '16px',
+              boxShadow: '0 8px 32px rgba(0, 0, 0, 0.2)'
+            }}>
+              <div style={{ textAlign: 'left' }}>
+                <span style={{ fontSize: '0.72rem', fontWeight: 800, color: 'var(--primary-cyan)', letterSpacing: '1.5px', textTransform: 'uppercase' }}>
+                  Unified Marketing Control Centre
+                </span>
+                <h2 style={{ fontSize: '1.6rem', fontWeight: 900, color: '#ffffff', margin: '4px 0 0 0', textShadow: '0 0 20px rgba(255,255,255,0.05)' }}>
+                  📊 ADMIN 통합 마케팅 성과 포털
+                </h2>
+                <p style={{ margin: '4px 0 0 0', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+                  최근 30일 무소진 휴면 계정을 제외한 실시간 활성 광고주들의 어제 하루 통합 지표를 관제합니다.
+                </p>
+              </div>
+              <button
+                onClick={() => fetchPortalData()}
+                className="btn-premium"
+                style={{
+                  background: 'rgba(6, 182, 212, 0.15)',
+                  border: '1px solid var(--primary-cyan)',
+                  color: 'var(--primary-cyan)',
+                  padding: '10px 20px',
+                  borderRadius: '12px',
+                  fontWeight: 700,
+                  fontSize: '0.85rem'
+                }}
+                disabled={portalLoading}
+              >
+                {portalLoading ? '🔄 포털 갱신 중...' : '🔄 실시간 관제 데이터 갱신'}
+              </button>
+            </div>
+
+            {portalLoading ? (
+              <div className="loading-view glass-panel" style={{ height: '300px' }}>
+                <div className="spinner"></div>
+                <div className="loading-text">통합 관제 포털 데이터를 산출하는 중...</div>
+              </div>
+            ) : accounts.length === 0 ? (
+              <div className="empty-view glass-panel" style={{ height: '300px' }}>
+                <div className="empty-icon">👈</div>
+                <h2 style={{ fontSize: '1.2rem', fontWeight: 600 }}>연동된 광고주 계정이 없습니다.</h2>
+                <p className="empty-text">사이드바 하단의 '🔄 광고주 목록 갱신' 버튼을 눌러 계정을 등록하세요.</p>
+              </div>
+            ) : (
+              <>
+                {/* 1. 🚨 긴급 점검 필요 광고주 경보 보드 (Urgent Anomaly Alerts) */}
+                {urgentAlerts.length > 0 && (
+                  <div className="glass-panel urgent-portal-alert-board" style={{
+                    background: 'rgba(244, 63, 94, 0.04)',
+                    border: '1px solid rgba(244, 63, 94, 0.3)',
+                    borderRadius: '20px',
+                    padding: '24px',
+                    boxShadow: '0 8px 32px rgba(244, 63, 94, 0.05)',
+                    animation: 'alertsPulse 3s infinite alternate'
+                  }}>
+                    <h3 className="urgent-pulse-title" style={{
+                      margin: '0 0 16px 0',
+                      fontSize: '1rem',
+                      fontWeight: 800,
+                      color: 'var(--primary-rose)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px'
+                    }}>
+                      <span className="urgent-pulse-dot" />
+                      🚨 긴급 점검 필요 광고주 경보 보드
+                    </h3>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+                      {urgentAlerts.map((alertItem, idx) => (
+                        <div
+                          key={idx}
+                          onClick={() => setSelectedAccountId(alertItem.customer_id)}
+                          className="urgent-alert-card"
+                          style={{
+                            background: 'rgba(15, 23, 42, 0.6)',
+                            border: '1px solid rgba(244, 63, 94, 0.15)',
+                            borderRadius: '12px',
+                            padding: '16px 20px',
+                            cursor: 'pointer',
+                            transition: 'all 0.25s ease',
+                            textAlign: 'left'
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                            <span style={{ fontWeight: 800, color: '#f8fafc', fontSize: '0.85rem' }}>{alertItem.ad_account_name}</span>
+                            <span style={{
+                              fontSize: '0.65rem',
+                              fontWeight: 900,
+                              color: '#ffffff',
+                              background: '#ef4444',
+                              padding: '2px 8px',
+                              borderRadius: '20px',
+                              textShadow: '0 0 10px rgba(255,255,255,0.4)',
+                              boxShadow: '0 0 8px rgba(239, 68, 68, 0.4)'
+                            }}>
+                              {alertItem.type === 'ZERO' ? 'OFF/소진중단' : alertItem.type === 'SURGE' ? '폭증' : '폭락'}
+                            </span>
+                          </div>
+                          <p style={{ margin: 0, fontSize: '0.78rem', color: '#cbd5e1', lineHeight: '1.5' }} dangerouslySetInnerHTML={{ __html: alertItem.message }}></p>
+                          <div style={{ textAlign: 'right', fontSize: '0.7rem', color: 'var(--primary-rose)', fontWeight: 800, marginTop: '8px' }}>
+                            🎯 즉시 정밀 튜닝 대시보드로 이동하기 →
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 2. 어제 하루 통합 메가 스코어보드 */}
+                <section className="stats-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
+                  <div className="stat-card glass-panel" style={{
+                    background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
+                    border: '1px solid rgba(6, 182, 212, 0.2)',
+                    boxShadow: '0 4px 20px rgba(6, 182, 212, 0.05)'
+                  }}>
+                    <span className="stat-label" style={{ color: 'var(--primary-cyan)' }}>🔗 전체 활성 광고주 수</span>
+                    <span className="stat-value" style={{ color: '#ffffff' }}>{activeAdvertisers.length}개사</span>
+                    <div className="stat-detail">
+                      <span>비활성/휴면 계정 제외</span>
+                    </div>
+                  </div>
+
+                  <div className="stat-card glass-panel rose" style={{
+                    background: 'linear-gradient(135deg, rgba(244, 63, 94, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
+                    border: '1px solid rgba(244, 63, 94, 0.2)',
+                    boxShadow: '0 4px 20px rgba(244, 63, 94, 0.05)'
+                  }}>
+                    <span className="stat-label">💸 어제 총 소진 광고비</span>
+                    <span className="stat-value">{formatNumber(Math.round(megaSummary.totalCost))}원</span>
+                    <div className="stat-detail">
+                      <span>평균 CPC: <strong>{formatNumber(megaSummary.avgCpc)}원</strong></span>
+                    </div>
+                  </div>
+
+                  <div className="stat-card glass-panel emerald" style={{
+                    background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
+                    border: '1px solid rgba(16, 185, 129, 0.2)',
+                    boxShadow: '0 4px 20px rgba(16, 185, 129, 0.05)'
+                  }}>
+                    <span className="stat-label">🛒 어제 총 구매완료수</span>
+                    <span className="stat-value">{formatNumber(megaSummary.totalPurchaseCcnt)}건</span>
+                    <div className="stat-detail">
+                      <span>통합 클릭률: <strong>{megaSummary.avgCtr.toFixed(2)}%</strong></span>
+                    </div>
+                  </div>
+
+                  <div className="stat-card glass-panel amber" style={{
+                    background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.05) 0%, rgba(15, 23, 42, 0.4) 100%)',
+                    border: '1px solid rgba(245, 158, 11, 0.2)',
+                    boxShadow: '0 4px 20px rgba(245, 158, 11, 0.05)'
+                  }}>
+                    <span className="stat-label">📈 어제 총 매출액 (전환)</span>
+                    <span className="stat-value">{formatNumber(Math.round(megaSummary.totalPurchaseConvAmt))}원</span>
+                    <div className="stat-detail">
+                      <span>통합 구매 ROAS: <strong>{megaSummary.avgRoas.toFixed(1)}%</strong></span>
+                    </div>
+                  </div>
+                </section>
+
+                {/* 3. 소진비 정렬 Active 그리드 카드 보드 */}
+                <div style={{ marginTop: '12px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--panel-border)', paddingBottom: '12px', marginBottom: '20px' }}>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, color: '#f8fafc', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      📋 실시간 활성 광고주별 성과 관제 보드 (소진액 순 정렬)
+                    </h3>
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>총 {activeAdvertisers.length}개 활성 업체 노출</span>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '20px' }}>
+                    {activeAdvertisers.map((acc, idx) => (
+                      <div
+                        key={acc.customer_id}
+                        onClick={() => setSelectedAccountId(acc.customer_id)}
+                        className="active-advertiser-portal-card"
+                        style={{
+                          background: 'rgba(30, 41, 59, 0.25)',
+                          border: '1px solid var(--panel-border)',
+                          borderRadius: '16px',
+                          padding: '20px',
+                          cursor: 'pointer',
+                          transition: 'all 0.25s ease',
+                          position: 'relative',
+                          overflow: 'hidden',
+                          textAlign: 'left'
+                        }}
+                      >
+                        <div style={{
+                          position: 'absolute',
+                          left: 0,
+                          top: 0,
+                          height: '4px',
+                          width: '100%',
+                          background: idx === 0 ? 'linear-gradient(90deg, #f59e0b, #eab308)' : 'linear-gradient(90deg, var(--primary-cyan), var(--primary-blue))'
+                        }} />
+                        
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
+                          <div>
+                            <h4 style={{ margin: 0, fontSize: '0.92rem', fontWeight: 800, color: '#f8fafc' }}>
+                              {idx === 0 && '👑 '}{acc.ad_account_name}
+                            </h4>
+                            <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>ID: {acc.customer_id}</span>
+                          </div>
+                          <span style={{
+                            fontSize: '0.62rem',
+                            fontWeight: 800,
+                            color: 'var(--primary-cyan)',
+                            background: 'rgba(6, 182, 212, 0.1)',
+                            border: '1px solid rgba(6, 182, 212, 0.3)',
+                            padding: '2px 8px',
+                            borderRadius: '12px'
+                          }}>
+                            RANK {idx + 1}
+                          </span>
+                        </div>
+
+                        {/* 수치 요약 */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', borderTop: '1px solid rgba(255,255,255,0.03)', paddingTop: '12px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
+                            <span style={{ color: 'var(--text-secondary)' }}>어제 소진 광고비:</span>
+                            <strong style={{ color: 'var(--primary-rose)' }}>{formatNumber(Math.round(acc.yesterdayCost))}원</strong>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
+                            <span style={{ color: 'var(--text-secondary)' }}>어제 구매완료수:</span>
+                            <strong style={{ color: 'var(--primary-emerald)' }}>{formatNumber(acc.yesterdayPurchase)}건</strong>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
+                            <span style={{ color: 'var(--text-secondary)' }}>어제 전환 매출액:</span>
+                            <strong style={{ color: '#ffffff' }}>{formatNumber(Math.round(acc.yesterdaySales))}원</strong>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
+                            <span style={{ color: 'var(--text-secondary)' }}>어제 구매 ROAS:</span>
+                            <strong style={{ color: 'var(--primary-amber)' }}>{acc.avgRoas.toFixed(1)}%</strong>
+                          </div>
+                        </div>
+
+                        <div style={{
+                          marginTop: '16px',
+                          paddingTop: '8px',
+                          borderTop: '1px dashed rgba(255,255,255,0.05)',
+                          fontSize: '0.7rem',
+                          color: 'var(--text-secondary)',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center'
+                        }}>
+                          <span>최근 30일 소진비: {formatNumber(Math.round(acc.total30Cost))}원</span>
+                          <span style={{ color: 'var(--primary-cyan)', fontWeight: 800 }}>대시보드 진입 →</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         )}
       </main>
@@ -3521,6 +4139,248 @@ export default function Dashboard() {
       )}
 
       {/* ========================================================
+         AI 성과 브리핑 임계값 커스텀 설정 모달 (V3.13)
+         ======================================================== */}
+      {showSettingsModal && (
+        <div className="modal-overlay" onClick={() => setShowSettingsModal(false)}>
+          <div className="modal-card glass-panel" style={{ maxWidth: '520px', width: '95%', padding: '28px' }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <span style={{ fontSize: '0.72rem', fontWeight: 800, color: 'var(--primary-cyan)', letterSpacing: '1px' }}>
+                  AI BRIEFING OPTION
+                </span>
+                <h3 style={{ fontSize: '1.2rem', fontWeight: 800, color: '#f8fafc', margin: 0 }}>
+                  ⚙️ AI 브리핑 임계값(최소컷) 커스텀 설정
+                </h3>
+              </div>
+              <button className="btn-modal-close" onClick={() => setShowSettingsModal(false)}>×</button>
+            </div>
+
+            <form onSubmit={handleSaveSettings} style={{ marginTop: '20px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: '1.5', background: 'rgba(255, 255, 255, 0.02)', padding: '12px 16px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                ℹ️ 여기서 설정한 최소 임계값 기준을 초과하는 성과가 기록된 캠페인 및 광고그룹만을 정밀 스캔하여 이상 징후(Anomaly)와 기간 변동(PoP) 인사이트 피드를 빌드합니다.
+              </div>
+
+              {/* A. 일일(Daily) 임계값 설정군 */}
+              <div style={{ border: '1px solid rgba(255,255,255,0.06)', borderRadius: '14px', padding: '16px', background: 'rgba(15, 23, 42, 0.3)' }}>
+                <h4 style={{ margin: '0 0 12px 0', fontSize: '0.85rem', fontWeight: 700, color: 'var(--primary-rose)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  📅 일일(Daily) 성과 분석 임계값 (1일 증분 분석용)
+                </h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                    <label style={{ fontSize: '0.8rem', color: 'var(--text-primary)', fontWeight: 600 }}>최소 일 광고비</label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <input
+                        type="number"
+                        className="login-input"
+                        style={{ width: '130px', padding: '6px 12px', fontSize: '0.85rem', textAlign: 'right' }}
+                        value={dailyMinCost}
+                        onChange={(e) => setDailyMinCost(Math.max(0, parseInt(e.target.value) || 0))}
+                        min="0"
+                        required
+                      />
+                      <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>원 이상</span>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                    <label style={{ fontSize: '0.8rem', color: 'var(--text-primary)', fontWeight: 600 }}>최소 일 노출수</label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <input
+                        type="number"
+                        className="login-input"
+                        style={{ width: '130px', padding: '6px 12px', fontSize: '0.85rem', textAlign: 'right' }}
+                        value={dailyMinImp}
+                        onChange={(e) => setDailyMinImp(Math.max(0, parseInt(e.target.value) || 0))}
+                        min="0"
+                        required
+                      />
+                      <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>회 이상</span>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                    <label style={{ fontSize: '0.8rem', color: 'var(--text-primary)', fontWeight: 600 }}>최소 일 구매완료수</label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <input
+                        type="number"
+                        step="0.1"
+                        className="login-input"
+                        style={{ width: '130px', padding: '6px 12px', fontSize: '0.85rem', textAlign: 'right' }}
+                        value={dailyMinPurchase}
+                        onChange={(e) => setDailyMinPurchase(Math.max(0, parseFloat(e.target.value) || 0))}
+                        min="0"
+                        required
+                      />
+                      <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>건 이상</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* B. 기간(Period) 임계값 설정군 */}
+              <div style={{ border: '1px solid rgba(255,255,255,0.06)', borderRadius: '14px', padding: '16px', background: 'rgba(15, 23, 42, 0.3)' }}>
+                <h4 style={{ margin: '0 0 12px 0', fontSize: '0.85rem', fontWeight: 700, color: 'var(--primary-emerald)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  📊 기간(Period) 성과 변동 임계값 (PoP 비교용)
+                </h4>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                    <label style={{ fontSize: '0.8rem', color: 'var(--text-primary)', fontWeight: 600 }}>최소 누적 광고비</label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <input
+                        type="number"
+                        className="login-input"
+                        style={{ width: '130px', padding: '6px 12px', fontSize: '0.85rem', textAlign: 'right' }}
+                        value={periodMinCost}
+                        onChange={(e) => setPeriodMinCost(Math.max(0, parseInt(e.target.value) || 0))}
+                        min="0"
+                        required
+                      />
+                      <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>원 이상</span>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                    <label style={{ fontSize: '0.8rem', color: 'var(--text-primary)', fontWeight: 600 }}>최소 누적 노출수</label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <input
+                        type="number"
+                        className="login-input"
+                        style={{ width: '130px', padding: '6px 12px', fontSize: '0.85rem', textAlign: 'right' }}
+                        value={periodMinImp}
+                        onChange={(e) => setPeriodMinImp(Math.max(0, parseInt(e.target.value) || 0))}
+                        min="0"
+                        required
+                      />
+                      <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>회 이상</span>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                    <label style={{ fontSize: '0.8rem', color: 'var(--text-primary)', fontWeight: 600 }}>최소 누적 구매완료수</label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <input
+                        type="number"
+                        className="login-input"
+                        style={{ width: '130px', padding: '6px 12px', fontSize: '0.85rem', textAlign: 'right' }}
+                        value={periodMinPurchase}
+                        onChange={(e) => setPeriodMinPurchase(Math.max(0, parseInt(e.target.value) || 0))}
+                        min="0"
+                        required
+                      />
+                      <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>건 이상</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 버튼 하단 영역 */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '10px' }}>
+                <button
+                  type="button"
+                  onClick={handleResetSettings}
+                  style={{
+                    background: 'rgba(255,255,255,0.03)',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    color: 'var(--text-secondary)',
+                    padding: '8px 14px',
+                    borderRadius: '10px',
+                    fontSize: '0.78rem',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    transition: 'var(--transition-smooth)'
+                  }}
+                  title="네이버 프리미엄 대시보드 권장 기본값으로 복원합니다."
+                >
+                  ↩️ 기본값 복원
+                </button>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button
+                    type="button"
+                    className="btn-sidebar-secondary"
+                    style={{ margin: 0, padding: '8px 16px', borderRadius: '10px' }}
+                    onClick={() => setShowSettingsModal(false)}
+                    disabled={savingSettings}
+                  >
+                    취소
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn-premium"
+                    style={{
+                      background: 'linear-gradient(135deg, var(--primary-cyan), var(--primary-blue))',
+                      boxShadow: '0 0 15px rgba(6, 182, 212, 0.3)',
+                      padding: '8px 20px',
+                      borderRadius: '10px',
+                      fontSize: '0.82rem',
+                      fontWeight: 700
+                    }}
+                    disabled={savingSettings}
+                  >
+                    {savingSettings ? '저장 중...' : '💾 저장 후 AI 재스캐닝'}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
+         V3.13: AI 브리핑 지표 스캐닝 & 피드 재조립 연산 진행률(0%~100%) 오버레이 모달
+         ======================================================== */}
+      {updatingBriefingFeed && (
+        <div className="modal-overlay" style={{ zIndex: 99999 }}>
+          <div className="modal-card glass-panel" style={{ maxWidth: '440px', width: '90%', padding: '36px', textAlign: 'center', boxShadow: '0 20px 50px rgba(0, 0, 0, 0.4)', border: '1px solid rgba(6, 182, 212, 0.3)' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px' }}>
+              
+              {/* 회전하는 AI 펄스 링 연출 */}
+              <div className="ai-pulse-spinner" />
+              
+              <h3 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#f8fafc', margin: 0, letterSpacing: '-0.5px' }}>
+                AI 인공지능 지표 스캐닝 진행 중
+              </h3>
+              
+              <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', margin: 0, lineHeight: '1.5' }}>
+                새로 설정된 임계값을 기준으로 광고 데이터의<br />
+                이상 징후 및 성과 변동 추이를 정밀 재분석하고 있습니다.
+              </p>
+
+              <div style={{ fontSize: '3.2rem', fontWeight: 950, color: 'var(--primary-cyan)', fontFamily: 'system-ui, sans-serif', textShadow: '0 0 25px rgba(6, 182, 212, 0.5)', margin: '5px 0' }}>
+                {briefingUpdateProgress}%
+              </div>
+
+              {/* 프로그레스바 */}
+              <div style={{ width: '100%', height: '8px', background: 'rgba(255, 255, 255, 0.05)', borderRadius: '10px', overflow: 'hidden', border: '1px solid rgba(255, 255, 255, 0.08)' }}>
+                <div style={{
+                  width: `${briefingUpdateProgress}%`,
+                  height: '100%',
+                  background: 'linear-gradient(90deg, var(--primary-cyan), var(--primary-blue))',
+                  borderRadius: '10px',
+                  transition: 'width 0.15s linear',
+                  boxShadow: '0 0 10px rgba(6, 182, 212, 0.6)'
+                }} />
+              </div>
+
+              {/* 진행률별 동적 AI 스캐닝 텍스트 */}
+              <div style={{ marginTop: '8px', width: '100%', minHeight: '36px' }}>
+                <div style={{ fontSize: '0.72rem', fontWeight: 800, color: 'var(--primary-cyan)', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>
+                  {briefingUpdateProgress < 25 ? 'STAGE 1: PARSING PARAMETERS'
+                   : briefingUpdateProgress < 50 ? 'STAGE 2: DATA LOADING'
+                   : briefingUpdateProgress < 75 ? 'STAGE 3: ANOMALY DETECTION'
+                   : briefingUpdateProgress < 100 ? 'STAGE 4: FEED GENERATION'
+                   : 'STAGE 5: COMPLETE'}
+                </div>
+                <div style={{ fontSize: '0.82rem', fontWeight: 600, color: '#e2e8f0', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                  {briefingUpdateProgress < 25 ? '🌀 AI 엔진 가동 및 광고주 설정 파라미터 로딩 중...'
+                   : briefingUpdateProgress < 50 ? '📊 최근 30일 누적 성과 원시 데이터 파싱 중...'
+                   : briefingUpdateProgress < 75 ? '🔍 설정된 임계값 기반 Anomaly 및 PoP 패턴 스캐닝 진행 중...'
+                   : briefingUpdateProgress < 100 ? '💡 성과 브리핑 요약문 최적화 및 인사이트 피드 재조립 중...'
+                   : '✅ AI 지표 스캐닝 완료! 브리핑 피드를 최신화합니다.'}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
          실시간 동기화 진행 상태 표시 모달 (SSE 스트리밍 연동)
          ======================================================== */}
       {syncingCampaigns && (
@@ -3572,6 +4432,70 @@ export default function Dashboard() {
 
       {/* 글로벌 스타일 오버레이 모달 */}
       <style jsx global>{`
+        /* ADMIN 포털 CSS 효과 */
+        @keyframes alertsPulse {
+          0% { border-color: rgba(244, 63, 94, 0.25); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2), 0 0 10px rgba(244, 63, 94, 0.05); }
+          100% { border-color: rgba(244, 63, 94, 0.55); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2), 0 0 25px rgba(244, 63, 94, 0.25); }
+        }
+        .urgent-pulse-title {
+          display: flex;
+          align-items: center;
+        }
+        .urgent-pulse-dot {
+          width: 8px;
+          height: 8px;
+          background-color: #ef4444;
+          border-radius: 50%;
+          display: inline-block;
+          box-shadow: 0 0 10px #ef4444;
+          animation: dotPulse 1.5s infinite;
+        }
+        @keyframes dotPulse {
+          0% { transform: scale(0.8); opacity: 0.5; }
+          50% { transform: scale(1.2); opacity: 1; box-shadow: 0 0 15px #ef4444; }
+          100% { transform: scale(0.8); opacity: 0.5; }
+        }
+        .urgent-alert-card {
+          transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .urgent-alert-card:hover {
+          transform: translateY(-2px);
+          border-color: rgba(244, 63, 94, 0.4) !important;
+          background: rgba(30, 41, 59, 0.8) !important;
+          box-shadow: 0 10px 25px rgba(244, 63, 94, 0.15);
+        }
+        .active-advertiser-portal-card {
+          transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .active-advertiser-portal-card:hover {
+          transform: translateY(-4px) scale(1.02);
+          border-color: var(--primary-cyan) !important;
+          background: rgba(30, 41, 59, 0.5) !important;
+          box-shadow: 0 12px 30px rgba(6, 182, 212, 0.2);
+        }
+
+        /* AI 스캐닝 스피너 및 펄스 효과 */
+        @keyframes aiPulse {
+          0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.5); }
+          70% { transform: scale(1); box-shadow: 0 0 0 20px rgba(6, 182, 212, 0); }
+          100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(6, 182, 212, 0); }
+        }
+        .ai-pulse-spinner {
+          width: 56px;
+          height: 56px;
+          background: radial-gradient(circle, var(--primary-cyan) 0%, rgba(6, 182, 212, 0.2) 100%);
+          border-radius: 50%;
+          animation: aiPulse 2s infinite;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .ai-pulse-spinner::after {
+          content: '🤖';
+          font-size: 1.6rem;
+          animation: spin 3s linear infinite;
+        }
+
         /* 실시간 동기화 SSE 스피너 및 펄스 효과 */
         @keyframes syncPulse {
           0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.5); }

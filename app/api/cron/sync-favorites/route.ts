@@ -70,6 +70,8 @@ async function callNaverApi(
   }
 }
 
+const TEST_MODE = true; // ⚡ 개발 중 초고속 수동 검증을 위한 테스트 모드 (true일 때 어제 하루치만 초고속 수집, 배포 시 false로 변경)
+
 // 당월 1일부터 어제까지의 날짜 범위 도출 유틸리티
 function getCronSyncDateRange() {
   const now = new Date();
@@ -85,11 +87,11 @@ function getCronSyncDateRange() {
 
   const yesterday = new Date(kstNow.getTime() - (24 * 60 * 60 * 1000));
   
-  // 당월 1일
-  const monthStart = new Date(Date.UTC(yesterday.getUTCFullYear(), yesterday.getUTCMonth(), 1));
+  // TEST_MODE가 켜져 있으면 어제 하루치만, 꺼져 있으면 당월 1일부터 어제까지 수집
+  const startDate = TEST_MODE ? yesterday : new Date(Date.UTC(yesterday.getUTCFullYear(), yesterday.getUTCMonth(), 1));
 
   return {
-    since: formatDate(monthStart),
+    since: formatDate(startDate),
     until: formatDate(yesterday)
   };
 }
@@ -117,26 +119,84 @@ export async function GET(req: NextRequest) {
   try {
     console.log('[Cron Sync Favorites] 백그라운드 스케줄링 동기화 작동 시작...');
 
-    // 1. DB에서 즐겨찾기(is_favorite = true)된 광고 계정 목록 조회
-    const { data: favAccounts, error: getFavErr } = await supabase
-      .from('advertiser_accounts')
-      .select('customer_id, user_id, ad_account_name')
-      .eq('is_favorite', true);
+    // 1. 모든 유저 정보(naver_customer_id가 설정된 유저들)와 권한 조회
+    const { data: allUsers, error: usersErr } = await supabase
+      .from('dashboard_users')
+      .select('id, role, user_name, login_id');
 
-    if (getFavErr) {
-      console.error('[Cron Sync] 즐겨찾기 계정 조회 실패:', getFavErr.message);
-      return NextResponse.json({ success: false, error: '즐겨찾기 계정 조회 중 오류가 발생했습니다.' }, { status: 500 });
+    if (usersErr || !allUsers) {
+      console.error('[Cron Sync] 전체 유저 정보 로드 실패:', usersErr?.message);
+      return NextResponse.json({ success: false, error: '유저 조회 중 오류가 발생했습니다.' }, { status: 500 });
     }
 
-    if (!favAccounts || favAccounts.length === 0) {
+    // ⚡ V3.14.3: TEST_MODE 상태일 때는 다른 테스터 계정(dailyon 등)을 싹 걷어내고 오직 "정태민" 대표님 계정만 핀포인트 조준!
+    const adminUserIds = TEST_MODE 
+      ? allUsers.filter(u => u.role === 'ADMIN' && u.user_name === '정태민').map(u => u.id)
+      : allUsers.filter(u => u.role === 'ADMIN').map(u => u.id);
+      
+    const regularUserIds = TEST_MODE 
+      ? [] 
+      : allUsers.filter(u => u.role !== 'ADMIN').map(u => u.id);
+
+    let targetAccounts: any[] = [];
+
+    // 2. ADMIN 계정에 매핑된 모든 광고 계정 일괄 조회 (즐겨찾기 여부 무관 전체)
+    if (adminUserIds.length > 0) {
+      const { data: adminAccs, error: adminAccsErr } = await supabase
+        .from('advertiser_accounts')
+        .select('customer_id, user_id, ad_account_name, is_favorite');
+      
+      if (adminAccsErr) {
+        console.error('[Cron Sync] ADMIN 광고주 계정 조회 실패:', adminAccsErr.message);
+      } else if (adminAccs) {
+        // ADMIN 소속 계정만 필터링
+        const filteredAdminAccs = adminAccs.filter(acc => adminUserIds.includes(acc.user_id));
+        console.log(`[Cron Sync] 최고 관리자(ADMIN) 소속 광고 계정 ${filteredAdminAccs.length}개 자동 수집 대상 추가.`);
+        targetAccounts.push(...filteredAdminAccs);
+      }
+    }
+
+    // 3. 일반 유저 계정의 경우 즐겨찾기(is_favorite = true)된 계정 조회
+    if (regularUserIds.length > 0) {
+      const { data: regAccs, error: regAccsErr } = await supabase
+        .from('advertiser_accounts')
+        .select('customer_id, user_id, ad_account_name, is_favorite')
+        .eq('is_favorite', true);
+      
+      if (regAccsErr) {
+        console.error('[Cron Sync] 일반 사용자 즐겨찾기 계정 조회 실패:', regAccsErr.message);
+      } else if (regAccs) {
+        // 일반 유저 소속 계정만 필터링
+        const filteredRegAccs = regAccs.filter(acc => regularUserIds.includes(acc.user_id));
+        
+        // 일반 유저별로 즐겨찾기 최대 3개 개수 제한 안전 룰 강제 적용
+        const groupedByRegUser: { [key: string]: any[] } = {};
+        filteredRegAccs.forEach(acc => {
+          if (!groupedByRegUser[acc.user_id]) groupedByRegUser[acc.user_id] = [];
+          groupedByRegUser[acc.user_id].push(acc);
+        });
+
+        Object.keys(groupedByRegUser).forEach(uid => {
+          const userAccs = groupedByRegUser[uid];
+          if (userAccs.length > 3) {
+            console.warn(`[Cron Sync] 일반 사용자 [${uid}] 즐겨찾기 개수 제한 초과 (${userAccs.length}개). 상위 3개 계정만 선별 수집합니다.`);
+            targetAccounts.push(...userAccs.slice(0, 3));
+          } else {
+            targetAccounts.push(...userAccs);
+          }
+        });
+      }
+    }
+
+    if (targetAccounts.length === 0) {
       console.log('[Cron Sync] 자동 동기화 대상으로 등록된 주요(⭐️) 계정이 없습니다. 스케줄러 종료.');
-      return NextResponse.json({ success: true, message: '즐겨찾기 계정이 존재하지 않아 스케줄링을 건너뜁니다.', synced_count: 0 });
+      return NextResponse.json({ success: true, message: '동기화 대상 계정이 존재하지 않아 스케줄링을 건너뜁니다.', synced_count: 0 });
     }
 
-    console.log(`[Cron Sync] 총 ${favAccounts.length}개 주요 계정 동기화 타겟팅 완료.`);
+    console.log(`[Cron Sync] 총 ${targetAccounts.length}개 주요 계정 동기화 타겟팅 완료.`);
 
     // 2. 고유 user_id 목록 취합하여 유저들의 API credentials 정보 조회
-    const userIds = Array.from(new Set(favAccounts.map(acc => acc.user_id)));
+    const userIds = Array.from(new Set(targetAccounts.map(acc => acc.user_id)));
     const { data: users, error: getUsersErr } = await supabase
       .from('dashboard_users')
       .select('id, naver_api_key, naver_secret_key, naver_customer_id')
@@ -158,7 +218,7 @@ export async function GET(req: NextRequest) {
     let totalSyncedAccounts = 0;
 
     // 4. 각 즐겨찾기 계정별 네이버 API 데이터 조회 및 Supabase Upsert 루프 실행
-    for (const acc of favAccounts) {
+    for (const acc of targetAccounts) {
       const cred = userCredMap.get(acc.user_id);
       if (!cred) {
         console.warn(`[Cron Sync] 유저 ID [${acc.user_id}]의 API Key가 유효하지 않아 ${acc.ad_account_name} 계정을 스킵합니다.`);
@@ -240,71 +300,114 @@ export async function GET(req: NextRequest) {
         const allAdgroupStats: any[] = [];
         const allAdStats: any[] = [];
 
+        const fields = ["impCnt", "clkCnt", "salesAmt", "ccnt", "convAmt", "purchaseCcnt", "purchaseConvAmt"];
+        const chunkSize = 10; // 네이버 API 400 에러 및 Rate Limit 방지를 위한 적정 청크 크기
+
         for (const dateStr of dateList) {
           await delay(100);
 
           // D-1. 캠페인 일별 통계 수집
-          try {
-            const queryParams = new URLSearchParams({
-              fields: '["impCnt","clkCnt","salesAmt","ccnt","convAmt","purchaseCcnt","purchaseConvAmt"]',
-              timeRange: `{"since":"${dateStr}","until":"${dateStr}"}`
-            });
-            const statsData = await callNaverApi('/stats/campaigns', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
-            const statsList = (statsData && statsData.data) || [];
-            statsList.forEach((item: any) => {
-              if (item.impCnt > 0 || item.clkCnt > 0 || item.salesAmt > 0) {
-                allStats.push({ ...item, date: dateStr });
+          if (campaigns.length > 0) {
+            for (let i = 0; i < campaigns.length; i += chunkSize) {
+              const chunk = campaigns.slice(i, i + chunkSize);
+              const campIds = chunk.map((c: any) => c.nccCampaignId);
+
+              const queryParams = new URLSearchParams({
+                ids: campIds.join(','),
+                fields: JSON.stringify(fields),
+                timeRange: JSON.stringify({ since: dateStr, until: dateStr }),
+                timeIncrement: 'allDays'
+              });
+
+              try {
+                const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
+                if (statsResponse && Array.isArray(statsResponse.data)) {
+                  statsResponse.data.forEach((item: any) => {
+                    if (item.impCnt > 0 || item.clkCnt > 0 || item.salesAmt > 0) {
+                      allStats.push({ ...item, campaignId: item.id, date: dateStr });
+                    }
+                  });
+                }
+              } catch (err: any) {
+                console.error(`[Cron Sync] ${dateStr} - 캠페인 통계 청크 로드 실패: ${err.message}`);
               }
-            });
-          } catch (err: any) {
-            console.error(`[Cron Sync] ${dateStr} - 캠페인 통계 로드 실패: ${err.message}`);
+              await delay(150);
+            }
           }
 
           // D-2. 광고그룹 일별 통계 수집
-          try {
-            const queryParams = new URLSearchParams({
-              fields: '["impCnt","clkCnt","salesAmt","ccnt","convAmt","purchaseCcnt","purchaseConvAmt"]',
-              timeRange: `{"since":"${dateStr}","until":"${dateStr}"}`
-            });
-            const statsData = await callNaverApi('/stats/adgroups', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
-            const statsList = (statsData && statsData.data) || [];
-            statsList.forEach((item: any) => {
-              if (item.impCnt > 0 || item.clkCnt > 0 || item.salesAmt > 0) {
-                allAdgroupStats.push({ ...item, date: dateStr });
+          if (allAdgroups.length > 0) {
+            for (let i = 0; i < allAdgroups.length; i += chunkSize) {
+              const chunk = allAdgroups.slice(i, i + chunkSize);
+              const adgIds = chunk.map((g: any) => g.nccAdgroupId);
+
+              const queryParams = new URLSearchParams({
+                ids: adgIds.join(','),
+                fields: JSON.stringify(fields),
+                timeRange: JSON.stringify({ since: dateStr, until: dateStr }),
+                timeIncrement: 'allDays'
+              });
+
+              try {
+                const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
+                if (statsResponse && Array.isArray(statsResponse.data)) {
+                  statsResponse.data.forEach((item: any) => {
+                    if (item.impCnt > 0 || item.clkCnt > 0 || item.salesAmt > 0) {
+                      allAdgroupStats.push({ ...item, adgroupId: item.id, date: dateStr });
+                    }
+                  });
+                }
+              } catch (err: any) {
+                console.error(`[Cron Sync] ${dateStr} - 광고그룹 통계 청크 로드 실패: ${err.message}`);
               }
-            });
-          } catch (err: any) {
-            console.error(`[Cron Sync] ${dateStr} - 광고그룹 통계 로드 실패: ${err.message}`);
+              await delay(150);
+            }
           }
 
           // D-3. 소재 일별 통계 수집
-          try {
-            const queryParams = new URLSearchParams({
-              fields: '["impCnt","clkCnt","salesAmt","ccnt","convAmt","purchaseCcnt","purchaseConvAmt"]',
-              timeRange: `{"since":"${dateStr}","until":"${dateStr}"}`
-            });
-            const statsData = await callNaverApi('/stats/ads', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
-            const statsList = (statsData && statsData.data) || [];
-            statsList.forEach((item: any) => {
-              if (item.impCnt > 0 || item.clkCnt > 0 || item.salesAmt > 0) {
-                allAdStats.push({ ...item, date: dateStr });
+          if (allAds.length > 0) {
+            for (let i = 0; i < allAds.length; i += chunkSize) {
+              const chunk = allAds.slice(i, i + chunkSize);
+              const adIds = chunk.map((a: any) => a.nccAdId);
+
+              const queryParams = new URLSearchParams({
+                ids: adIds.join(','),
+                fields: JSON.stringify(fields),
+                timeRange: JSON.stringify({ since: dateStr, until: dateStr }),
+                timeIncrement: 'allDays'
+              });
+
+              try {
+                const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
+                if (statsResponse && Array.isArray(statsResponse.data)) {
+                  statsResponse.data.forEach((item: any) => {
+                    if (item.impCnt > 0 || item.clkCnt > 0 || item.salesAmt > 0) {
+                      allAdStats.push({ ...item, adId: item.id, date: dateStr });
+                    }
+                  });
+                }
+              } catch (err: any) {
+                console.error(`[Cron Sync] ${dateStr} - 소재 통계 청크 로드 실패: ${err.message}`);
               }
-            });
-          } catch (err: any) {
-            console.error(`[Cron Sync] ${dateStr} - 소재 통계 로드 실패: ${err.message}`);
+              await delay(150);
+            }
           }
         }
 
         // E. 수집된 일별 통계들을 Supabase에 1대1 매핑하여 DB Upsert 적재
         // E-1. 캠페인 적재
         const campaignStatsToInsert: any[] = [];
+        const uniqueCampaignStats = new Map<string, any>();
+
         allStats.forEach(item => {
           const camp = campMap.get(item.campaignId);
           if (!camp) return;
-          campaignStatsToInsert.push({
+
+          const uniqueKey = `${item.campaignId}:${item.date}`;
+          uniqueCampaignStats.set(uniqueKey, {
             campaign_id: item.campaignId,
             date: item.date,
-            campaign_name: camp.campaignName,
+            campaign_name: camp.campaignName || '이름 없음(캠페인)', // 💡 만약을 대비한 fallback 방어막
             campaign_type: camp.campaignType,
             campaign_status: camp.status,
             imp_cnt: item.impCnt || 0,
@@ -314,24 +417,32 @@ export async function GET(req: NextRequest) {
             conv_amt: item.convAmt || 0,
             purchase_ccnt: item.purchaseCcnt || 0,
             purchase_conv_amt: item.purchaseConvAmt || 0,
-            user_id: acc.user_id
+            user_id: acc.user_id,
+            customer_id: customerId 
           });
         });
 
+        campaignStatsToInsert.push(...uniqueCampaignStats.values());
+
         if (campaignStatsToInsert.length > 0) {
-          const { error: statsError } = await supabase.from('campaign_stats').upsert(campaignStatsToInsert);
+          // 💡 onConflict 명시로 duplicate key violates unique constraint 원천 해결!
+          const { error: statsError } = await supabase.from('campaign_stats').upsert(campaignStatsToInsert, { onConflict: 'campaign_id,date' });
           if (statsError) console.error(`[Cron Sync] 캠페인 DB 적재 에러: ${statsError.message}`);
         }
 
         // E-2. 광고그룹 적재
         const adgroupStatsToInsert: any[] = [];
+        const uniqueAdgroupStats = new Map<string, any>();
+
         allAdgroupStats.forEach(item => {
           const adg = adgroupMap.get(item.adgroupId);
           if (!adg) return;
-          adgroupStatsToInsert.push({
+
+          const uniqueKey = `${item.adgroupId}:${item.date}`;
+          uniqueAdgroupStats.set(uniqueKey, {
             adgroup_id: item.adgroupId,
             date: item.date,
-            adgroup_name: adg.adgroupName,
+            adgroup_name: adg.adgroupName || adg.name || '이름 없음(광고그룹)', // 💡 null value violates not-null constraint 원천 해결!
             adgroup_type: adg.adgroupType,
             adgroup_status: adg.status,
             campaign_id: adg.nccCampaignId,
@@ -342,17 +453,23 @@ export async function GET(req: NextRequest) {
             conv_amt: item.convAmt || 0,
             purchase_ccnt: item.purchaseCcnt || 0,
             purchase_conv_amt: item.purchaseConvAmt || 0,
-            user_id: acc.user_id
+            user_id: acc.user_id,
+            customer_id: customerId 
           });
         });
 
+        adgroupStatsToInsert.push(...uniqueAdgroupStats.values());
+
         if (adgroupStatsToInsert.length > 0) {
-          const { error: adgStatsError } = await supabase.from('adgroup_stats').upsert(adgroupStatsToInsert);
+          // 💡 onConflict 명시로 duplicate key violates unique constraint 원천 해결!
+          const { error: adgStatsError } = await supabase.from('adgroup_stats').upsert(adgroupStatsToInsert, { onConflict: 'adgroup_id,date' });
           if (adgStatsError) console.error(`[Cron Sync] 광고그룹 DB 적재 에러: ${adgStatsError.message}`);
         }
 
         // E-3. 소재 적재
         const adStatsToInsert: any[] = [];
+        const uniqueAdStats = new Map<string, any>();
+
         allAdStats.forEach(item => {
           const adItem = adMap.get(item.adId);
           if (!adItem) return;
@@ -363,12 +480,14 @@ export async function GET(req: NextRequest) {
           const adDetail = adItem.ad || {};
           const adName = refData.productName || refData.productTitle || adDetail.headline || adDetail.description || adItem.type || '소재';
 
-          adStatsToInsert.push({
+          const uniqueKey = `${item.adId}:${item.date}`;
+          uniqueAdStats.set(uniqueKey, {
             ad_id: item.adId,
             date: item.date,
             ad_name: adName,
             ad_type: adItem.type,
             ad_status: adItem.status,
+            inspect_status: adItem.inspectStatus || 'APPROVED', // 💡 null value in column "inspect_status" violates not-null constraint 원천 해결!
             adgroup_id: adItem.nccAdgroupId,
             campaign_id: campaignId,
             imp_cnt: item.impCnt || 0,
@@ -378,12 +497,16 @@ export async function GET(req: NextRequest) {
             conv_amt: item.convAmt || 0,
             purchase_ccnt: item.purchaseCcnt || 0,
             purchase_conv_amt: item.purchaseConvAmt || 0,
-            user_id: acc.user_id
+            user_id: acc.user_id,
+            customer_id: customerId 
           });
         });
 
+        adStatsToInsert.push(...uniqueAdStats.values());
+
         if (adStatsToInsert.length > 0) {
-          const { error: adStatsError } = await supabase.from('ad_stats').upsert(adStatsToInsert);
+          // 💡 onConflict 명시로 duplicate key violates unique constraint 원천 해결!
+          const { error: adStatsError } = await supabase.from('ad_stats').upsert(adStatsToInsert, { onConflict: 'ad_id,date' });
           if (adStatsError) console.error(`[Cron Sync] 소재 DB 적재 에러: ${adStatsError.message}`);
         }
 
