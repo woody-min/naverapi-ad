@@ -189,7 +189,7 @@ export async function GET(req: NextRequest) {
     }
 
     // === [테스트 전용 격리 필터 작동] ===
-    const TEST_ONLY_MODE = true;
+    const TEST_ONLY_MODE = false;
     const TEST_CUSTOMER_IDS = ['755366', '258701', '2027430', '1268037', '2931592'];
 
     let finalAccounts = targetAccounts;
