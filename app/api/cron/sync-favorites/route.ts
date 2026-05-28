@@ -305,102 +305,101 @@ export async function GET(req: NextRequest) {
           await delay(200);
         }
 
-        // D. 일자별 순회 조회 (캠페인, 광고그룹, 소재 통계 적재)
+        // D. 일자별 순회 조회 대신 통째 벌크 쿼리 조회 (timeIncrement: 'daily' 기법으로 60일치 날짜별 데이터를 1번에 초고속 획득!)
         const allStats: any[] = [];
         const allAdgroupStats: any[] = [];
         const allAdStats: any[] = [];
 
         const fields = ["impCnt", "clkCnt", "salesAmt", "ccnt", "convAmt", "purchaseCcnt", "purchaseConvAmt"];
-        const chunkSize = 150; // 네이버 API 400 에러 및 Rate Limit 방지를 위한 최적 벌크 청크 크기 (기존 10 ➔ 150으로 대폭 축소)
+        const chunkSize = 150; // 네이버 API 400 에러 및 Rate Limit 방지를 위한 최적 벌크 청크 크기
 
-        for (const dateStr of dateList) {
-          await delay(100);
+        // D-1. 캠페인 벌크 통계 수집 (날짜 루프 없이 통째로 1회 호출)
+        if (campaigns.length > 0) {
+          for (let i = 0; i < campaigns.length; i += chunkSize) {
+            const chunk = campaigns.slice(i, i + chunkSize);
+            const campIds = chunk.map((c: any) => c.nccCampaignId);
 
-          // D-1. 캠페인 일별 통계 수집
-          if (campaigns.length > 0) {
-            for (let i = 0; i < campaigns.length; i += chunkSize) {
-              const chunk = campaigns.slice(i, i + chunkSize);
-              const campIds = chunk.map((c: any) => c.nccCampaignId);
+            const queryParams = new URLSearchParams({
+              ids: campIds.join(','),
+              fields: JSON.stringify(fields),
+              timeRange: JSON.stringify({ since, until }), // 60일 기간 통째로 지정
+              timeIncrement: 'daily' // 'daily' 옵션으로 일별 쪼개진 레코드 한꺼번에 획득
+            });
 
-              const queryParams = new URLSearchParams({
-                ids: campIds.join(','),
-                fields: JSON.stringify(fields),
-                timeRange: JSON.stringify({ since: dateStr, until: dateStr }),
-                timeIncrement: 'allDays'
-              });
-
-              try {
-                const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
-                if (statsResponse && Array.isArray(statsResponse.data)) {
-                  statsResponse.data.forEach((item: any) => {
-                    if (item.impCnt > 0 || item.clkCnt > 0 || item.salesAmt > 0) {
-                      allStats.push({ ...item, campaignId: item.id, date: dateStr });
-                    }
-                  });
-                }
-              } catch (err: any) {
-                console.error(`[Cron Sync] ${dateStr} - 캠페인 통계 청크 로드 실패: ${err.message}`);
+            try {
+              const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
+              if (statsResponse && Array.isArray(statsResponse.data)) {
+                statsResponse.data.forEach((item: any) => {
+                  const statDate = item.dateStart; // daily 응답에서 날짜 추출
+                  if (item.impCnt > 0 || item.clkCnt > 0 || item.salesAmt > 0) {
+                    allStats.push({ ...item, campaignId: item.id, date: statDate });
+                  }
+                });
               }
-              await delay(150);
+            } catch (err: any) {
+              console.error(`[Cron Sync] 캠페인 통계 벌크 로드 실패: ${err.message}`);
             }
+            await delay(150);
           }
+        }
 
-          // D-2. 광고그룹 일별 통계 수집
-          if (allAdgroups.length > 0) {
-            for (let i = 0; i < allAdgroups.length; i += chunkSize) {
-              const chunk = allAdgroups.slice(i, i + chunkSize);
-              const adgIds = chunk.map((g: any) => g.nccAdgroupId);
+        // D-2. 광고그룹 벌크 통계 수집 (날짜 루프 없이 통째로 1회 호출)
+        if (allAdgroups.length > 0) {
+          for (let i = 0; i < allAdgroups.length; i += chunkSize) {
+            const chunk = allAdgroups.slice(i, i + chunkSize);
+            const adgIds = chunk.map((g: any) => g.nccAdgroupId);
 
-              const queryParams = new URLSearchParams({
-                ids: adgIds.join(','),
-                fields: JSON.stringify(fields),
-                timeRange: JSON.stringify({ since: dateStr, until: dateStr }),
-                timeIncrement: 'allDays'
-              });
+            const queryParams = new URLSearchParams({
+              ids: adgIds.join(','),
+              fields: JSON.stringify(fields),
+              timeRange: JSON.stringify({ since, until }),
+              timeIncrement: 'daily'
+            });
 
-              try {
-                const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
-                if (statsResponse && Array.isArray(statsResponse.data)) {
-                  statsResponse.data.forEach((item: any) => {
-                    if (item.impCnt > 0 || item.clkCnt > 0 || item.salesAmt > 0) {
-                      allAdgroupStats.push({ ...item, adgroupId: item.id, date: dateStr });
-                    }
-                  });
-                }
-              } catch (err: any) {
-                console.error(`[Cron Sync] ${dateStr} - 광고그룹 통계 청크 로드 실패: ${err.message}`);
+            try {
+              const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
+              if (statsResponse && Array.isArray(statsResponse.data)) {
+                statsResponse.data.forEach((item: any) => {
+                  const statDate = item.dateStart;
+                  if (item.impCnt > 0 || item.clkCnt > 0 || item.salesAmt > 0) {
+                    allAdgroupStats.push({ ...item, adgroupId: item.id, date: statDate });
+                  }
+                });
               }
-              await delay(150);
+            } catch (err: any) {
+              console.error(`[Cron Sync] 광고그룹 통계 벌크 로드 실패: ${err.message}`);
             }
+            await delay(150);
           }
+        }
 
-          // D-3. 소재 일별 통계 수집
-          if (allAds.length > 0) {
-            for (let i = 0; i < allAds.length; i += chunkSize) {
-              const chunk = allAds.slice(i, i + chunkSize);
-              const adIds = chunk.map((a: any) => a.nccAdId);
+        // D-3. 소재 벌크 통계 수집 (날짜 루프 없이 통째로 1회 호출)
+        if (allAds.length > 0) {
+          for (let i = 0; i < allAds.length; i += chunkSize) {
+            const chunk = allAds.slice(i, i + chunkSize);
+            const adIds = chunk.map((a: any) => a.nccAdId);
 
-              const queryParams = new URLSearchParams({
-                ids: adIds.join(','),
-                fields: JSON.stringify(fields),
-                timeRange: JSON.stringify({ since: dateStr, until: dateStr }),
-                timeIncrement: 'allDays'
-              });
+            const queryParams = new URLSearchParams({
+              ids: adIds.join(','),
+              fields: JSON.stringify(fields),
+              timeRange: JSON.stringify({ since, until }),
+              timeIncrement: 'daily'
+            });
 
-              try {
-                const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
-                if (statsResponse && Array.isArray(statsResponse.data)) {
-                  statsResponse.data.forEach((item: any) => {
-                    if (item.impCnt > 0 || item.clkCnt > 0 || item.salesAmt > 0) {
-                      allAdStats.push({ ...item, adId: item.id, date: dateStr });
-                    }
-                  });
-                }
-              } catch (err: any) {
-                console.error(`[Cron Sync] ${dateStr} - 소재 통계 청크 로드 실패: ${err.message}`);
+            try {
+              const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
+              if (statsResponse && Array.isArray(statsResponse.data)) {
+                statsResponse.data.forEach((item: any) => {
+                  const statDate = item.dateStart;
+                  if (item.impCnt > 0 || item.clkCnt > 0 || item.salesAmt > 0) {
+                    allAdStats.push({ ...item, adId: item.id, date: statDate });
+                  }
+                });
               }
-              await delay(150);
+            } catch (err: any) {
+              console.error(`[Cron Sync] 소재 통계 벌크 로드 실패: ${err.message}`);
             }
+            await delay(150);
           }
         }
 

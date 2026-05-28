@@ -2291,14 +2291,27 @@ export default function Dashboard() {
 
   const activeAccount = accounts.find(acc => acc.customer_id === selectedAccountId);
 
-  // 광고주 검색 필터
-  const filteredAccounts = accounts.filter(acc => {
-    const term = accountSearchTerm.toLowerCase();
-    return (
-      acc.ad_account_name.toLowerCase().includes(term) ||
-      acc.customer_id.includes(term)
-    );
-  });
+  // 광고주 검색 필터 및 즐겨찾기(is_favorite) 우선 정렬
+  const filteredAccounts = accounts
+    .filter(acc => {
+      const term = accountSearchTerm.toLowerCase();
+      return (
+        acc.ad_account_name.toLowerCase().includes(term) ||
+        acc.customer_id.includes(term)
+      );
+    })
+    .sort((a, b) => {
+      const aFav = a.is_favorite ? 1 : 0;
+      const bFav = b.is_favorite ? 1 : 0;
+      
+      // 1. 즐겨찾기(is_favorite = true)된 계정을 최상단으로 우선 정렬 (내림차순)
+      if (aFav !== bFav) {
+        return bFav - aFav;
+      }
+      
+      // 2. 즐겨찾기 여부가 같다면, 광고주명 오름차순으로 사전식 정렬
+      return a.ad_account_name.localeCompare(b.ad_account_name);
+    });
 
   // 종합 통계 집계 계산
   const summary = campaigns.reduce(
