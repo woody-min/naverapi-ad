@@ -1158,16 +1158,46 @@ export default function Dashboard() {
       console.log('6. 어제 기준 판정 날짜 (yesterdayStr):', yesterdayStr);
       console.log('7. 30일 범위 시작 날짜 (since30DaysStr):', since30DaysStr);
 
-      // Supabase에서 30일간의 데이터를 단 한번에 일괄 조회 (IN 쿼리 사용)
-      // ⚡ V3.14.4: 1,000건 디폴트 조회 한도를 5,000건으로 확장하고 최신순 정렬을 보장하여 어제 자 데이터가 유실되지 않도록 완벽 보강!
-      const { data: allCamps30Days, error: errCamps } = await supabase
-        .from('campaign_stats')
-        .select('*')
-        .in('customer_id', customerIds)
-        .gte('date', since30DaysStr)
-        .lte('date', yesterdayStr)
-        .order('date', { ascending: false }) // 최신 날짜 최우선 로드 보장
-        .limit(5000); // 1,000건 한계 전격 돌파
+      // Supabase에서 30일간의 데이터를 각 광고주별로 병렬(Promise.all) 일괄 조회하여 PostgREST 1,000건 제한 원천 회피!
+      // ⚡ V3.15.1: iriskorea처럼 캠페인이 53개 이상인 대형 광고주는 30일치 데이터가 1,590건에 달해 1,000건 서버 하드 캡 한도에 잘려 나갑니다.
+      // 이를 우회하기 위해 30일을 "15일씩 두 조각"으로 분할하여 병렬 수집한 뒤 합산하는 명품 이중 세그먼트 아키텍처를 가동합니다!
+      let allCamps30Days: any[] = [];
+      let errCamps: any = null;
+
+      try {
+        const midDate = new Date(yesterday.getTime() - (15 * 24 * 60 * 60 * 1000));
+        const midDateStr = formatDate(midDate);
+
+        const statsPromises = customerIds.map(async (cid) => {
+          const seg1Promise = supabase
+            .from('campaign_stats')
+            .select('customer_id, date, sales_amt, imp_cnt, clk_cnt, purchase_ccnt, purchase_conv_amt')
+            .eq('customer_id', cid)
+            .gte('date', midDateStr)
+            .lte('date', yesterdayStr)
+            .limit(1000);
+
+          const seg2Promise = supabase
+            .from('campaign_stats')
+            .select('customer_id, date, sales_amt, imp_cnt, clk_cnt, purchase_ccnt, purchase_conv_amt')
+            .eq('customer_id', cid)
+            .gte('date', since30DaysStr)
+            .lt('date', midDateStr)
+            .limit(1000);
+
+          const [res1, res2] = await Promise.all([seg1Promise, seg2Promise]);
+          
+          if (res1.error) throw res1.error;
+          if (res2.error) throw res2.error;
+          
+          return [...(res1.data || []), ...(res2.data || [])];
+        });
+
+        const results = await Promise.all(statsPromises);
+        allCamps30Days = results.flat();
+      } catch (err: any) {
+        errCamps = err;
+      }
 
       if (errCamps) throw errCamps;
 

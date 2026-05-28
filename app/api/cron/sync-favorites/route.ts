@@ -70,9 +70,9 @@ async function callNaverApi(
   }
 }
 
-const TEST_MODE = true; // ⚡ 개발 중 초고속 수동 검증을 위한 테스트 모드 (true일 때 어제 하루치만 초고속 수집, 배포 시 false로 변경)
+const TEST_MODE = false; // ⚡ 개발 중 초고속 수동 검증을 위한 테스트 모드 (false 일 때 최근 60일치 전체 일별 벌크 자동 적재)
 
-// 당월 1일부터 어제까지의 날짜 범위 도출 유틸리티
+// 당월 1일부터 어제까지의 날짜 범위 도출 유틸리티 (대조군 확보를 위해 최근 60일로 전격 확장)
 function getCronSyncDateRange() {
   const now = new Date();
   // KST (한국 표준시) 보정
@@ -87,8 +87,8 @@ function getCronSyncDateRange() {
 
   const yesterday = new Date(kstNow.getTime() - (24 * 60 * 60 * 1000));
   
-  // TEST_MODE가 켜져 있으면 어제 하루치만, 꺼져 있으면 당월 1일부터 어제까지 수집
-  const startDate = TEST_MODE ? yesterday : new Date(Date.UTC(yesterday.getUTCFullYear(), yesterday.getUTCMonth(), 1));
+  // TEST_MODE가 켜져 있으면 어제 하루치만, 꺼져 있으면 과거 60일 전부터 어제까지 촘촘히 60일치 일별 벌크 수집
+  const startDate = TEST_MODE ? yesterday : new Date(yesterday.getTime() - (60 * 24 * 60 * 60 * 1000));
 
   return {
     since: formatDate(startDate),
@@ -188,15 +188,25 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    if (targetAccounts.length === 0) {
-      console.log('[Cron Sync] 자동 동기화 대상으로 등록된 주요(⭐️) 계정이 없습니다. 스케줄러 종료.');
+    // === [테스트 전용 격리 필터 작동] ===
+    const TEST_ONLY_MODE = true;
+    const TEST_CUSTOMER_IDS = ['755366', '258701', '2027430', '1268037', '2931592'];
+
+    let finalAccounts = targetAccounts;
+    if (TEST_ONLY_MODE) {
+      finalAccounts = targetAccounts.filter(acc => TEST_CUSTOMER_IDS.includes(acc.customer_id));
+      console.log(`[Cron Sync][TEST MODE] 오직 지정된 5개 테스트 계정만 수집하도록 격리 필터 가동 (대상: ${finalAccounts.length}개)`);
+    }
+
+    if (finalAccounts.length === 0) {
+      console.log('[Cron Sync] 자동 동기화 대상으로 등록된 주요(⭐️) 계정이 없거나 테스트 격리 조건에 맞지 않습니다. 스케줄러 종료.');
       return NextResponse.json({ success: true, message: '동기화 대상 계정이 존재하지 않아 스케줄링을 건너뜁니다.', synced_count: 0 });
     }
 
-    console.log(`[Cron Sync] 총 ${targetAccounts.length}개 주요 계정 동기화 타겟팅 완료.`);
+    console.log(`[Cron Sync] 총 ${finalAccounts.length}개 주요 계정 동기화 타겟팅 완료.`);
 
     // 2. 고유 user_id 목록 취합하여 유저들의 API credentials 정보 조회
-    const userIds = Array.from(new Set(targetAccounts.map(acc => acc.user_id)));
+    const userIds = Array.from(new Set(finalAccounts.map(acc => acc.user_id)));
     const { data: users, error: getUsersErr } = await supabase
       .from('dashboard_users')
       .select('id, naver_api_key, naver_secret_key, naver_customer_id')
@@ -218,7 +228,7 @@ export async function GET(req: NextRequest) {
     let totalSyncedAccounts = 0;
 
     // 4. 각 즐겨찾기 계정별 네이버 API 데이터 조회 및 Supabase Upsert 루프 실행
-    for (const acc of targetAccounts) {
+    for (const acc of finalAccounts) {
       const cred = userCredMap.get(acc.user_id);
       if (!cred) {
         console.warn(`[Cron Sync] 유저 ID [${acc.user_id}]의 API Key가 유효하지 않아 ${acc.ad_account_name} 계정을 스킵합니다.`);
@@ -301,7 +311,7 @@ export async function GET(req: NextRequest) {
         const allAdStats: any[] = [];
 
         const fields = ["impCnt", "clkCnt", "salesAmt", "ccnt", "convAmt", "purchaseCcnt", "purchaseConvAmt"];
-        const chunkSize = 10; // 네이버 API 400 에러 및 Rate Limit 방지를 위한 적정 청크 크기
+        const chunkSize = 150; // 네이버 API 400 에러 및 Rate Limit 방지를 위한 최적 벌크 청크 크기 (기존 10 ➔ 150으로 대폭 축소)
 
         for (const dateStr of dateList) {
           await delay(100);
@@ -407,7 +417,7 @@ export async function GET(req: NextRequest) {
           uniqueCampaignStats.set(uniqueKey, {
             campaign_id: item.campaignId,
             date: item.date,
-            campaign_name: camp.campaignName || '이름 없음(캠페인)', // 💡 만약을 대비한 fallback 방어막
+            campaign_name: camp.campaignName || camp.name || '이름 없음(캠페인)', // 💡 만약을 대비한 fallback 방어막
             campaign_type: camp.campaignType,
             campaign_status: camp.status,
             imp_cnt: item.impCnt || 0,
