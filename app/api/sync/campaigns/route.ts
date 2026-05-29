@@ -633,4 +633,8 @@ export async function POST(req: NextRequest) {
       'X-Accel-Buffering': 'no' // Nginx 버퍼링 차단 (중요!)
     }
   });
+  } catch (err: any) {
+    console.error('[Sync Campaigns API Outer Error]:', err.message);
+    return NextResponse.json({ success: false, error: err.message || '서버 오류가 발생했습니다.' }, { status: 500 });
+  }
 }
