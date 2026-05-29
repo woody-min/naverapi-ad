@@ -103,7 +103,7 @@ function getDatesInRange(since: string, until: string): string[] {
   
   const diffTime = Math.abs(end.getTime() - start.getTime());
   const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
-  const limitDays = Math.min(diffDays, 31);
+  const limitDays = Math.min(diffDays, 90);
   
   for (let i = 0; i < limitDays; i++) {
     const current = new Date(start.getTime() + (i * 24 * 60 * 60 * 1000));
