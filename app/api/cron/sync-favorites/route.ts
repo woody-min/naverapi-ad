@@ -116,8 +116,12 @@ function getDatesInRange(since: string, until: string): string[] {
 }
 
 export async function GET(req: NextRequest) {
+  const startTime = Date.now();
+  const { searchParams } = new URL(req.url);
+  const startIndex = parseInt(searchParams.get('startIndex') || '0', 10);
+
   try {
-    console.log('[Cron Sync Favorites] 백그라운드 스케줄링 동기화 작동 시작...');
+    console.log(`[Cron Sync Favorites] 백그라운드 스케줄링 동기화 작동 시작 (시작 index: ${startIndex})...`);
 
     // 1. 모든 유저 정보(naver_customer_id가 설정된 유저들)와 권한 조회
     const { data: allUsers, error: usersErr } = await supabase
@@ -228,7 +232,8 @@ export async function GET(req: NextRequest) {
     let totalSyncedAccounts = 0;
 
     // 4. 각 즐겨찾기 계정별 네이버 API 데이터 조회 및 Supabase Upsert 루프 실행
-    for (const acc of finalAccounts) {
+    for (let i = startIndex; i < finalAccounts.length; i++) {
+      const acc = finalAccounts[i];
       const cred = userCredMap.get(acc.user_id);
       if (!cred) {
         console.warn(`[Cron Sync] 유저 ID [${acc.user_id}]의 API Key가 유효하지 않아 ${acc.ad_account_name} 계정을 스킵합니다.`);
@@ -545,7 +550,24 @@ export async function GET(req: NextRequest) {
         console.log(`[Cron Sync] [${acc.ad_account_name}] 동기화 완료 (점진적 적재)`);
         totalSyncedAccounts++;
 
+        // ⏱️ Vercel 60초 타임아웃 우회를 위한 셀프 릴레이 바톤 터치 가동
+        const elapsed = (Date.now() - startTime) / 1000;
+        if (elapsed > 40 && i < finalAccounts.length - 1) {
+          console.warn(`[Cron Sync] 60초 타임아웃 경고 감지! 경과 시간: ${elapsed.toFixed(1)}초. 다음 계정 인덱스 [${i + 1}/${finalAccounts.length}] 릴레이 트리거를 예약합니다.`);
+          
+          const nextUrl = `${req.nextUrl.origin}${req.nextUrl.pathname}?startIndex=${i + 1}`;
+          // 비동기로 호출 (결과 대기 없이 다음 실행 런칭)
+          fetch(nextUrl, { method: 'GET' }).catch(err => {
+            console.error(`[Cron Sync Relay Error]: ${err.message}`);
+          });
 
+          return NextResponse.json({
+            success: true,
+            message: `타임아웃 방지를 위해 인덱스 ${i}에서 바톤 터치를 수행하고 정상 1차 종료합니다.`,
+            nextIndex: i + 1,
+            synced_count: totalSyncedAccounts
+          });
+        }
       } catch (err: any) {
         console.error(`[Cron Sync] [${acc.ad_account_name}] 동기화 실패: ${err.message}`);
       }
