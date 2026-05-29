@@ -194,6 +194,7 @@ export async function POST(req: NextRequest) {
         const sinceParam = searchParams.get('since');
         const untilParam = searchParams.get('until');
         const targetUserId = searchParams.get('targetUserId');
+        const isManualForce = searchParams.get('isManualForce') === 'true';
 
         if (!customerId) {
           sendEvent({ error: '광고주 고객 ID(customerId)가 필요합니다.' });
@@ -227,7 +228,41 @@ export async function POST(req: NextRequest) {
 
         // 3. KST 보정된 실질 날짜 조회 범위 도출
         const { since, until } = getKstDateRange(datePreset, sinceParam, untilParam);
-        sendEvent({ progress: 5, stage: 'INITIALIZE', message: `동기화 준비 완료. 조회 범위: ${since} ~ ${until}` });
+        let dateList = getDatesInRange(since, until);
+
+        if (!isManualForce) {
+          sendEvent({ progress: 6, stage: 'SMART_FILTER', message: `DB 누락 날짜 계산 중...` });
+          const { data: existingDates } = await supabase
+            .from('campaign_stats')
+            .select('date')
+            .eq('customer_id', customerId)
+            .gte('date', since)
+            .lte('date', until);
+
+          const existingDateSet = new Set(existingDates?.map(r => r.date) || []);
+          
+          const nowKst = new Date(Date.now() + (9 * 60 * 60 * 1000));
+          const volatileDates = new Set<string>();
+          for(let i=0; i<3; i++) {
+            const d = new Date(nowKst.getTime() - (i * 24 * 60 * 60 * 1000));
+            volatileDates.add(`${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`);
+          }
+
+          dateList = dateList.filter(d => !existingDateSet.has(d) || volatileDates.has(d));
+          if (dateList.length === 0) {
+            sendEvent({
+              success: true,
+              progress: 100,
+              stage: 'COMPLETE',
+              message: '모든 데이터가 최신 상태입니다. (스마트 동기화 패스)',
+              details: { synced_campaigns_count: 0, synced_adgroups_count: 0, synced_ads_count: 0 }
+            });
+            controller.close();
+            return;
+          }
+        }
+
+        sendEvent({ progress: 8, stage: 'INITIALIZE', message: `동기화 타겟 날짜 수: ${dateList.length}일` });
         
         // 4. 네이버 API에서 해당 광고주의 캠페인 목록 조회
         sendEvent({ progress: 8, stage: 'CAMPAIGNS', message: '네이버에서 캠페인 목록을 가져오는 중...' });
@@ -310,21 +345,21 @@ export async function POST(req: NextRequest) {
           await delay(250); // 429 완화를 위한 딜레이 조정
         }
 
-        // 5. 일자별 리스트 생성하여 순회 조회
-        const dateList = getDatesInRange(since, until);
+        // 5. 일자별 리스트 순회 조회
         sendEvent({ progress: 20, stage: 'PREPARE_STATS', message: `일자별 성과 수집 시작 (총 ${dateList.length}일분)...` });
 
-        const allStats: any[] = [];
-        const allAdgroupStats: any[] = [];
-        const allAdStats: any[] = [];
+        
         const fields = [
           "impCnt", "clkCnt", "salesAmt", "ctr", "cpc", "ccnt", "crto",
           "convAmt", "ror", "cpConv", "purchaseCcnt", "purchaseConvAmt", "purchaseRor"
         ];
 
         let dateIndex = 0;
+        let totalCampaignsSynced = 0;
+        let totalAdgroupsSynced = 0;
+        let totalAdsSynced = 0;
+
         for (const dateStr of dateList) {
-          // 일자별 수집 진행도 반영 (20% ~ 85% 구간을 날짜별로 균등 배분)
           const dateProgress = 20 + Math.round((dateIndex / dateList.length) * 65);
           sendEvent({
             progress: dateProgress,
@@ -333,6 +368,11 @@ export async function POST(req: NextRequest) {
           });
 
           const chunkSize = 100;
+          
+          // 일별 데이터
+          const dailyCampStats: any[] = [];
+          const dailyAdgStats: any[] = [];
+          const dailyAdStats: any[] = [];
 
           // 캠페인 통계 수집
           for (let i = 0; i < campaigns.length; i += chunkSize) {
@@ -349,16 +389,12 @@ export async function POST(req: NextRequest) {
             try {
               const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
               if (statsResponse && Array.isArray(statsResponse.data)) {
-                const dataWithDate = statsResponse.data.map((item: any) => ({
-                  ...item,
-                  dateStart: dateStr
-                }));
-                allStats.push(...dataWithDate);
+                dailyCampStats.push(...statsResponse.data);
               }
             } catch (err: any) {
               console.error(`[Sync Campaigns API] ${dateStr} - 캠페인 청크 통계 로드 실패: ${err.message}`);
             }
-            await delay(150); // 429 완화를 위한 딜레이 조정
+            await delay(150);
           }
 
           // 광고그룹 통계 수집
@@ -377,16 +413,12 @@ export async function POST(req: NextRequest) {
               try {
                 const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
                 if (statsResponse && Array.isArray(statsResponse.data)) {
-                  const dataWithDate = statsResponse.data.map((item: any) => ({
-                    ...item,
-                    dateStart: dateStr
-                  }));
-                  allAdgroupStats.push(...dataWithDate);
+                  dailyAdgStats.push(...statsResponse.data);
                 }
               } catch (err: any) {
                 console.error(`[Sync Campaigns API] ${dateStr} - 광고그룹 청크 통계 로드 실패: ${err.message}`);
               }
-              await delay(150); // 429 완화를 위한 딜레이 조정
+              await delay(150);
             }
           }
 
@@ -406,44 +438,27 @@ export async function POST(req: NextRequest) {
               try {
                 const statsResponse = await callNaverApi('/stats', apiKey, secretKey, managerCustomerId, 'GET', queryParams, customerId);
                 if (statsResponse && Array.isArray(statsResponse.data)) {
-                  const dataWithDate = statsResponse.data.map((item: any) => ({
-                    ...item,
-                    dateStart: dateStr
-                  }));
-                  allAdStats.push(...dataWithDate);
+                  dailyAdStats.push(...statsResponse.data);
                 }
               } catch (err: any) {
                 console.error(`[Sync Campaigns API] ${dateStr} - 소재 청크 통계 로드 실패: ${err.message}`);
               }
-              await delay(150); // 429 완화를 위한 딜레이 조정
+              await delay(150);
             }
           }
-          dateIndex++;
-        }
 
-        // 6. 마스터 ID와 날짜를 조합한 통계 맵 구성 (0건 성과 매핑용)
-        sendEvent({ progress: 88, stage: 'MAP_STATS', message: '수집 완료! 마스터 정보 매핑 작업 중...' });
-        const campStatsMap = new Map<string, any>();
-        allStats.forEach(stat => {
-          campStatsMap.set(`${stat.id}:${stat.dateStart}`, stat);
-        });
+          // 일별 맵 구성
+          const campStatsMap = new Map();
+          dailyCampStats.forEach(stat => campStatsMap.set(stat.id, stat));
+          const adgStatsMap = new Map();
+          dailyAdgStats.forEach(stat => adgStatsMap.set(stat.id, stat));
+          const adStatsMap = new Map();
+          dailyAdStats.forEach(stat => adStatsMap.set(stat.id, stat));
 
-        const adgStatsMap = new Map<string, any>();
-        allAdgroupStats.forEach(stat => {
-          adgStatsMap.set(`${stat.id}:${stat.dateStart}`, stat);
-        });
-
-        const adStatsMap = new Map<string, any>();
-        allAdStats.forEach(stat => {
-          adStatsMap.set(`${stat.id}:${stat.dateStart}`, stat);
-        });
-
-        // 7. DB에 적재할 캠페인 Upsert용 배열 가공
-        const campaignStatsToInsert: any[] = [];
-        for (const dateStr of dateList) {
+          // 일별 Upsert 배열 가공 (캠페인)
+          const campaignStatsToInsert: any[] = [];
           campaigns.forEach(camp => {
-            const stat = campStatsMap.get(`${camp.nccCampaignId}:${dateStr}`) || {};
-            
+            const stat = campStatsMap.get(camp.nccCampaignId) || {};
             campaignStatsToInsert.push({
               campaign_id: camp.nccCampaignId,
               date: dateStr,
@@ -469,30 +484,11 @@ export async function POST(req: NextRequest) {
               synced_at: new Date().toISOString()
             });
           });
-        }
 
-        // 7-2. 캠페인 DB Upsert 처리 (100개씩 청크 단위)
-        sendEvent({ progress: 91, stage: 'SAVING_CAMPAIGNS', message: `캠페인 성과 데이터 저장 중... (총 ${campaignStatsToInsert.length}건)` });
-        let totalCampaignsSynced = 0;
-        const dbChunkSize = 100;
-        for (let j = 0; j < campaignStatsToInsert.length; j += dbChunkSize) {
-          const dbChunk = campaignStatsToInsert.slice(j, j + dbChunkSize);
-          const { error: statsError } = await supabase
-            .from('campaign_stats')
-            .upsert(dbChunk, { onConflict: 'campaign_id,date' });
-
-          if (statsError) {
-            throw new Error(`캠페인 DB 적재에 실패했습니다: ${statsError.message}`);
-          }
-          totalCampaignsSynced += dbChunk.length;
-        }
-
-        // 8. DB에 적재할 광고그룹 Upsert용 배열 가공
-        const adgroupStatsToInsert: any[] = [];
-        for (const dateStr of dateList) {
+          // 일별 Upsert 배열 가공 (광고그룹)
+          const adgroupStatsToInsert: any[] = [];
           allAdgroups.forEach(adg => {
-            const stat = adgStatsMap.get(`${adg.nccAdgroupId}:${dateStr}`) || {};
-            
+            const stat = adgStatsMap.get(adg.nccAdgroupId) || {};
             adgroupStatsToInsert.push({
               adgroup_id: adg.nccAdgroupId,
               date: dateStr,
@@ -520,36 +516,16 @@ export async function POST(req: NextRequest) {
               synced_at: new Date().toISOString()
             });
           });
-        }
 
-        // 8-2. 광고그룹 DB Upsert 처리 (100개씩 청크 단위)
-        sendEvent({ progress: 94, stage: 'SAVING_ADGROUPS', message: `광고그룹 성과 데이터 저장 중... (총 ${adgroupStatsToInsert.length}건)` });
-        let totalAdgroupsSynced = 0;
-        for (let j = 0; j < adgroupStatsToInsert.length; j += dbChunkSize) {
-          const dbChunk = adgroupStatsToInsert.slice(j, j + dbChunkSize);
-          const { error: adgStatsError } = await supabase
-            .from('adgroup_stats')
-            .upsert(dbChunk, { onConflict: 'adgroup_id,date' });
-
-          if (adgStatsError) {
-            throw new Error(`광고그룹 DB 적재에 실패했습니다: ${adgStatsError.message}`);
-          }
-          totalAdgroupsSynced += dbChunk.length;
-        }
-
-        // 9. DB에 적재할 소재 Upsert용 배열 가공
-        const adStatsToInsert: any[] = [];
-        for (const dateStr of dateList) {
+          // 일별 Upsert 배열 가공 (소재)
+          const adStatsToInsert: any[] = [];
           allAds.forEach(adItem => {
-            const stat = adStatsMap.get(`${adItem.nccAdId}:${dateStr}`) || {};
+            const stat = adStatsMap.get(adItem.nccAdId) || {};
             const adDetail = adItem.ad || {};
-            
             const parentAdgroup = adgroupMap.get(adItem.nccAdgroupId) || {};
             const campaignId = parentAdgroup.nccCampaignId || 'UNKNOWN';
-            
             const refData = adItem.referenceData || {};
             const adName = refData.productName || refData.productTitle || adDetail.headline || adDetail.description || adItem.type || '소재';
-            
             adStatsToInsert.push({
               ad_id: adItem.nccAdId,
               date: dateStr,
@@ -577,21 +553,34 @@ export async function POST(req: NextRequest) {
               synced_at: new Date().toISOString()
             });
           });
-        }
 
-        // 9-2. 소재 DB Upsert 처리 (100개씩 청크 단위)
-        sendEvent({ progress: 97, stage: 'SAVING_ADS', message: `소재 성과 데이터 저장 중... (총 ${adStatsToInsert.length}건)` });
-        let totalAdsSynced = 0;
-        for (let j = 0; j < adStatsToInsert.length; j += dbChunkSize) {
-          const dbChunk = adStatsToInsert.slice(j, j + dbChunkSize);
-          const { error: adStatsError } = await supabase
-            .from('ad_stats')
-            .upsert(dbChunk, { onConflict: 'ad_id,date' });
-
-          if (adStatsError) {
-            throw new Error(`소재 DB 적재에 실패했습니다: ${adStatsError.message}`);
+          // 일별 DB Upsert 실행 (청크 단위)
+          sendEvent({ progress: dateProgress + 2, stage: 'SAVING_STATS', message: `[${dateStr}] DB 점진적 저장 중...` });
+          
+          const dbChunkSize = 100;
+          
+          for (let j = 0; j < campaignStatsToInsert.length; j += dbChunkSize) {
+            const dbChunk = campaignStatsToInsert.slice(j, j + dbChunkSize);
+            const { error: statsError } = await supabase.from('campaign_stats').upsert(dbChunk, { onConflict: 'campaign_id,date' });
+            if (statsError) throw new Error(`캠페인 DB 적재 실패: ${statsError.message}`);
+            totalCampaignsSynced += dbChunk.length;
           }
-          totalAdsSynced += dbChunk.length;
+
+          for (let j = 0; j < adgroupStatsToInsert.length; j += dbChunkSize) {
+            const dbChunk = adgroupStatsToInsert.slice(j, j + dbChunkSize);
+            const { error: adgStatsError } = await supabase.from('adgroup_stats').upsert(dbChunk, { onConflict: 'adgroup_id,date' });
+            if (adgStatsError) throw new Error(`광고그룹 DB 적재 실패: ${adgStatsError.message}`);
+            totalAdgroupsSynced += dbChunk.length;
+          }
+
+          for (let j = 0; j < adStatsToInsert.length; j += dbChunkSize) {
+            const dbChunk = adStatsToInsert.slice(j, j + dbChunkSize);
+            const { error: adStatsError } = await supabase.from('ad_stats').upsert(dbChunk, { onConflict: 'ad_id,date' });
+            if (adStatsError) throw new Error(`소재 DB 적재 실패: ${adStatsError.message}`);
+            totalAdsSynced += dbChunk.length;
+          }
+
+          dateIndex++;
         }
 
         // 10. 광고주 테이블의 last_synced_at 갱신

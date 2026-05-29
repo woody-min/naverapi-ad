@@ -1832,12 +1832,11 @@ export default function Dashboard() {
   };
 
   // 5. 특정 광고주 지정 기간의 캠페인 및 광고그룹 통계 실시간 동기화 (SSE 스트리밍 진행률 연동)
-  const handleSyncCampaigns = async (customerId: string, syncSince?: string) => {
+  const handleSyncCampaigns = async (customerId: string, syncSince?: string, isManualForce: boolean = false) => {
     if (!currentUser || !customerId) return;
     const filterUserId = currentUser.role === 'ADMIN' ? selectedUserFilter : currentUser.id;
     if (!filterUserId) return;
 
-    // 비동기 요청 고유 ID 발급 및 기록
     const requestId = Date.now();
     activeRequestRef.current = requestId;
 
@@ -1845,69 +1844,117 @@ export default function Dashboard() {
       setSyncingCampaigns(true);
       setSyncProgress(0);
       setSyncStage('INITIALIZE');
-      setSyncMessage('서버와 실시간 연결을 설정하는 중...');
+      setSyncMessage('동기화 준비 및 날짜 분할 중...');
 
-      let url = `/api/sync/campaigns?customerId=${customerId}`;
-      const startSince = syncSince || since;
-      if (syncSince || datePreset === 'custom') {
-        url += `&since=${startSince}&until=${until}`;
-      } else {
-        url += `&datePreset=${datePreset}`;
+      let actualSince = syncSince || since;
+      let actualUntil = until;
+
+      // syncSince가 없고 datePreset이 custom이 아닐 때 실제 KST 기준 시작-종료 날짜 계산
+      if (!syncSince && datePreset !== 'custom') {
+        const now = new Date();
+        const kstNow = new Date(now.getTime() + (9 * 60 * 60 * 1000));
+        const yesterday = new Date(kstNow.getTime() - (24 * 60 * 60 * 1000));
+        
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const formatDate = (d: Date) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+        
+        let sDate = yesterday;
+        let uDate = yesterday;
+
+        switch (datePreset) {
+          case 'last7days':
+            sDate = new Date(yesterday.getTime() - (6 * 24 * 60 * 60 * 1000));
+            break;
+          case 'last30days':
+            sDate = new Date(yesterday.getTime() - (29 * 24 * 60 * 60 * 1000));
+            break;
+          case 'lastweek': {
+            const currentDay = kstNow.getUTCDay();
+            const daysToLastMonday = (currentDay === 0 ? 7 : currentDay) + 6;
+            sDate = new Date(kstNow.getTime() - (daysToLastMonday * 24 * 60 * 60 * 1000));
+            uDate = new Date(sDate.getTime() + (6 * 24 * 60 * 60 * 1000));
+            break;
+          }
+          case 'lastmonth': {
+            const year = kstNow.getUTCFullYear();
+            const month = kstNow.getUTCMonth();
+            sDate = new Date(Date.UTC(year, month - 1, 1));
+            uDate = new Date(Date.UTC(year, month, 0));
+            break;
+          }
+        }
+        actualSince = formatDate(sDate);
+        actualUntil = formatDate(uDate);
       }
 
-      // ADMIN이 대리동기화 중이면 대상 targetUserId 전달
-      if (currentUser.role === 'ADMIN' && selectedUserFilter) {
-        url += `&targetUserId=${selectedUserFilter}`;
-      }
-
-      const response = await fetch(url, { method: 'POST' });
+      const startDate = new Date(actualSince);
+      const endDate = new Date(actualUntil);
+      const diffDays = Math.ceil(Math.abs(endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+      const limitDays = Math.min(diffDays, 90);
       
-      if (!response.ok) {
-        throw new Error(`동기화 서버 연결에 실패했습니다. (HTTP ${response.status})`);
+      const allDates: string[] = [];
+      const pad2 = (n: number) => String(n).padStart(2, '0');
+      for(let i=0; i<limitDays; i++) {
+        const d = new Date(startDate.getTime() + (i * 24 * 60 * 60 * 1000));
+        allDates.push(`${d.getUTCFullYear()}-${pad2(d.getUTCMonth()+1)}-${pad2(d.getUTCDate())}`);
       }
 
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      
-      if (!reader) {
-        throw new Error('스트리밍 리더를 설정할 수 없습니다.');
+      const chunkSize = 5;
+      const chunks = [];
+      for(let i=0; i<allDates.length; i+=chunkSize) {
+        const chunkDates = allDates.slice(i, i+chunkSize);
+        chunks.push({
+          since: chunkDates[0],
+          until: chunkDates[chunkDates.length - 1]
+        });
       }
 
-      let completeDetails: any = null;
       let errorOccurred = false;
       let errorMessage = '';
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        
+        let url = `/api/sync/campaigns?customerId=${customerId}&since=${chunk.since}&until=${chunk.until}&isManualForce=${isManualForce}`;
+        if (currentUser.role === 'ADMIN' && selectedUserFilter) {
+          url += `&targetUserId=${selectedUserFilter}`;
+        }
 
-        const chunk = decoder.decode(value, { stream: true });
-        // EventStream은 "data: { ... }\n\n" 형식이 연속으로 내려오므로 분할 파싱
-        const lines = chunk.split('\n');
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              
-              if (data.error) {
-                errorOccurred = true;
-                errorMessage = data.error;
-                break;
-              }
+        const response = await fetch(url, { method: 'POST' });
+        if (!response.ok) {
+          throw new Error(`동기화 서버 연결에 실패했습니다. (HTTP ${response.status})`);
+        }
 
-              if (data.progress !== undefined) {
-                setSyncProgress(data.progress);
-                setSyncStage(data.stage || '');
-                setSyncMessage(data.message || '');
-              }
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+        if (!reader) throw new Error('스트리밍 리더를 설정할 수 없습니다.');
 
-              if (data.stage === 'COMPLETE' && data.success) {
-                completeDetails = data.details;
-              }
-            } catch (e) {
-              // 파싱 노이즈 예방
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+
+          const chunkText = decoder.decode(value, { stream: true });
+          const lines = chunkText.split('\n');
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.error) {
+                  errorOccurred = true;
+                  errorMessage = data.error;
+                  break;
+                }
+                if (data.progress !== undefined) {
+                  const baseProgress = (i / chunks.length) * 100;
+                  const chunkProgress = data.progress / chunks.length;
+                  setSyncProgress(Math.min(100, Math.round(baseProgress + chunkProgress)));
+                  setSyncStage(data.stage || '');
+                  setSyncMessage(`[${i+1}/${chunks.length} 구간: ${chunk.since}~${chunk.until}] ${data.message || ''}`);
+                }
+              } catch (e) {}
             }
           }
+          if (errorOccurred) break;
         }
         if (errorOccurred) break;
       }
@@ -1916,22 +1963,18 @@ export default function Dashboard() {
         throw new Error(errorMessage || '동기화 중 에러가 보고되었습니다.');
       }
 
-      // 동기화 완료 후 DB에서 다시 범위 데이터 쿼리 및 마스터 이름 정보 비동기 갱신
       const [campData, adgData, adData] = await Promise.all([
-        supabaseFetchAll('campaign_stats', customerId, startSince, until),
-        supabaseFetchAll('adgroup_stats', customerId, startSince, until),
-        supabaseFetchAll('ad_stats', customerId, startSince, until)
+        supabaseFetchAll('campaign_stats', customerId, actualSince, actualUntil),
+        supabaseFetchAll('adgroup_stats', customerId, actualSince, actualUntil),
+        supabaseFetchAll('ad_stats', customerId, actualSince, actualUntil)
       ]);
 
-      // 마스터 이름 캐시 최신화 (동기화 완료 후 비동기 호출)
       fetchMasterNames(customerId);
 
-      // 메인 테이블 표시용으로 현재 날짜 범위에만 속하는 데이터 분리 필터링
       const currentCampData = campData.filter(row => row.date >= since && row.date <= until);
       const currentAdgData = adgData.filter(row => row.date >= since && row.date <= until);
       const currentAdData = adData.filter(row => row.date >= since && row.date <= until);
 
-      // 비동기 요청 엇갈림 검증 (동기화 완료 처리 덮어쓰기 방지)
       if (requestId !== activeRequestRef.current) {
         console.log('[Dashboard] 엇갈린 과거 비동기 동기화(sync) 요청 결과 드롭 처리 완료.');
         return;
@@ -2783,7 +2826,7 @@ export default function Dashboard() {
                     popSince = formatDate(popSinceDate);
                   }
 
-                  handleSyncCampaigns(selectedAccountId, popSince);
+                  handleSyncCampaigns(selectedAccountId, popSince, true);
                 }}
                 disabled={syncingCampaigns || loadingCampaigns || loadingAdgroups || loadingAds}
               >
