@@ -110,6 +110,37 @@ type SortOrder = 'asc' | 'desc';
 export default function Dashboard() {
   const router = useRouter();
 
+  // ⚡ 상태 및 심사 배지 4단계 매핑 헬퍼 함수 정의
+  const renderStatusBadge = (status: string) => {
+    const s = status ? status.toUpperCase() : 'UNKNOWN';
+    switch (s) {
+      case 'ELIGIBLE':
+        return <span className="badge eligible">노출가능</span>;
+      case 'LIMITED_ELIGIBLE':
+        return <span className="badge limited_eligible">소진제한(예산)</span>;
+      case 'PAUSED':
+        return <span className="badge paused">일시중지</span>;
+      case 'DELETED':
+        return <span className="badge deleted">삭제됨</span>;
+      default:
+        return <span className="badge paused">{status || '미정'}</span>;
+    }
+  };
+
+  const renderInspectBadge = (inspectStatus: string) => {
+    const s = inspectStatus ? inspectStatus.toUpperCase() : 'UNKNOWN';
+    switch (s) {
+      case 'APPROVED':
+        return <span style={{ fontSize: '0.65rem', color: 'var(--primary-emerald)', fontWeight: 600 }}>승인완료</span>;
+      case 'REVIEWING':
+        return <span style={{ fontSize: '0.65rem', color: 'var(--primary-amber)', fontWeight: 600 }}>심사대기</span>;
+      case 'REJECTED':
+        return <span style={{ fontSize: '0.65rem', color: 'var(--primary-rose)', fontWeight: 600 }}>심사반려</span>;
+      default:
+        return <span style={{ fontSize: '0.65rem', color: 'var(--text-secondary)' }}>{inspectStatus || '대기'}</span>;
+    }
+  };
+
   // 비동기 경쟁 상태 (Race Condition) 엇갈림 방지용 참조체
   const activeRequestRef = useRef<number>(0);
 
@@ -3634,12 +3665,8 @@ export default function Dashboard() {
                                                                         <td style={{ padding: '6px 8px', color: 'var(--text-secondary)' }}>{suba.ad_type}</td>
                                                                         <td style={{ padding: '6px 8px' }}>
                                                                           <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-                                                                            <span className={`badge ${suba.ad_status.toLowerCase()}`} style={{ fontSize: '0.6rem', padding: '1px 4px' }}>
-                                                                              {suba.ad_status === 'ELIGIBLE' ? '노출가능' : '노출제한'}
-                                                                            </span>
-                                                                            <span style={{ fontSize: '0.6rem', color: suba.inspect_status === 'APPROVED' ? 'var(--primary-emerald)' : 'var(--text-secondary)' }}>
-                                                                              {suba.inspect_status === 'APPROVED' ? '승인' : suba.inspect_status}
-                                                                            </span>
+                                                                              {renderStatusBadge(suba.ad_status)}
+                                                                              {renderInspectBadge(suba.inspect_status)}
                                                                           </div>
                                                                         </td>
                                                                         <td style={{ padding: '6px 8px', textAlign: 'right' }}>{formatNumber(suba.imp_cnt)}</td>
@@ -3788,12 +3815,8 @@ export default function Dashboard() {
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                       <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{adItem.ad_type}</span>
                                       <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-                                        <span className={`badge ${adItem.ad_status.toLowerCase()}`} style={{ padding: '2px 6px', fontSize: '0.65rem' }}>
-                                          {adItem.ad_status === 'ELIGIBLE' ? '노출가능' : '노출제한'}
-                                        </span>
-                                        <span style={{ fontSize: '0.65rem', color: adItem.inspect_status === 'APPROVED' ? 'var(--primary-emerald)' : 'var(--text-secondary)' }}>
-                                          {adItem.inspect_status === 'APPROVED' ? '승인완료' : adItem.inspect_status}
-                                        </span>
+                                          {renderStatusBadge(adItem.ad_status)}
+                                          {renderInspectBadge(adItem.inspect_status)}
                                       </div>
                                     </div>
                                   </td>

@@ -418,6 +418,18 @@ body {
 }
 
 .badge.paused {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text-secondary);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.badge.limited_eligible {
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--primary-amber);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.badge.deleted {
   background: rgba(244, 63, 94, 0.12);
   color: var(--primary-rose);
   border: 1px solid rgba(244, 63, 94, 0.2);
