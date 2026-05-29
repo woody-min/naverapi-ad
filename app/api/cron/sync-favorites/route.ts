@@ -563,6 +563,9 @@ export async function GET(req: NextRequest) {
             console.error(`[Cron Sync Relay Error]: ${err.message}`);
           });
 
+          // ⚡ V3.15.5: Vercel 서버리스가 리턴 즉시 프로세스를 프리징하여 호출이 차단되는 현상을 완벽히 방지하기 위해 1.5초간 네트워크 송출 골든타임 대기
+          await delay(1500);
+
           return NextResponse.json({
             success: true,
             message: `타임아웃 방지를 위해 인덱스 ${i}에서 바톤 터치를 수행하고 정상 1차 종료합니다.`,
