@@ -329,6 +329,7 @@ export async function GET(req: NextRequest) {
         const formatDate = (d: Date) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 
         const volatileDates = new Set([
+          formatDate(kstNow), // ⚡ 오늘자 실시간 노출 상태 변동성 즉시 수집
           formatDate(new Date(kstNow.getTime() - (24 * 60 * 60 * 1000))),
           formatDate(new Date(kstNow.getTime() - (2 * 24 * 60 * 60 * 1000))),
           formatDate(new Date(kstNow.getTime() - (3 * 24 * 60 * 60 * 1000)))
@@ -442,9 +443,7 @@ export async function GET(req: NextRequest) {
 
           const campaignStatsToInsert: any[] = [];
           campaigns.forEach(camp => {
-            const stat = campStatsMap.get(camp.nccCampaignId);
-            if (!stat) return;
-            if (!(stat.impCnt > 0 || stat.clkCnt > 0 || stat.salesAmt > 0)) return;
+            const stat = campStatsMap.get(camp.nccCampaignId) || {};
 
             campaignStatsToInsert.push({
               campaign_id: camp.nccCampaignId,
@@ -466,9 +465,7 @@ export async function GET(req: NextRequest) {
 
           const adgroupStatsToInsert: any[] = [];
           allAdgroups.forEach(adg => {
-            const stat = adgStatsMap.get(adg.nccAdgroupId);
-            if (!stat) return;
-            if (!(stat.impCnt > 0 || stat.clkCnt > 0 || stat.salesAmt > 0)) return;
+            const stat = adgStatsMap.get(adg.nccAdgroupId) || {};
 
             adgroupStatsToInsert.push({
               adgroup_id: adg.nccAdgroupId,
@@ -491,9 +488,7 @@ export async function GET(req: NextRequest) {
 
           const adStatsToInsert: any[] = [];
           allAds.forEach(adItem => {
-            const stat = adStatsMap.get(adItem.nccAdId);
-            if (!stat) return;
-            if (!(stat.impCnt > 0 || stat.clkCnt > 0 || stat.salesAmt > 0)) return;
+            const stat = adStatsMap.get(adItem.nccAdId) || {};
 
             const parentAdgroup = adgroupMap.get(adItem.nccAdgroupId) || {};
             const campaignId = parentAdgroup.nccCampaignId || 'UNKNOWN';
