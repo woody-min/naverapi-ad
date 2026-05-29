@@ -161,77 +161,78 @@ function sanitizeFloat(val: any): number {
 }
 
 export async function POST(req: NextRequest) {
-  const encoder = new TextEncoder();
+  const { searchParams } = new URL(req.url);
+  const customerId = searchParams.get('customerId');
+  const datePreset = searchParams.get('datePreset') || 'yesterday';
+  const sinceParam = searchParams.get('since');
+  const untilParam = searchParams.get('until');
+  const targetUserId = searchParams.get('targetUserId');
+  const isManualForce = searchParams.get('isManualForce') === 'true';
+  const campaignId = searchParams.get('campaignId');
+  const onlyCampaigns = searchParams.get('onlyCampaigns') === 'true';
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      const sendEvent = (data: any) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-      };
+  try {
+    // 1. 공통 세션 및 권한 검증
+    const cookieStore = await cookies();
+    const sessionToken = cookieStore.get('app_session')?.value;
 
-      try {
-        // 1. 세션 검증
-        sendEvent({ progress: 1, stage: 'AUTH', message: '사용자 세션을 확인하고 있습니다...' });
-        const cookieStore = await cookies();
-        const sessionToken = cookieStore.get('app_session')?.value;
+    if (!sessionToken) {
+      return NextResponse.json({ success: false, error: '인증되지 않은 요청입니다. 다시 로그인해 주세요.' }, { status: 401 });
+    }
 
-        if (!sessionToken) {
-          sendEvent({ error: '인증되지 않은 요청입니다. 다시 로그인해 주세요.' });
-          controller.close();
-          return;
-        }
+    const decoded = decryptSession(sessionToken);
+    if (!decoded) {
+      return NextResponse.json({ success: false, error: '유효하지 않은 세션입니다.' }, { status: 401 });
+    }
 
-        const decoded = decryptSession(sessionToken);
-        if (!decoded) {
-          sendEvent({ error: '유효하지 않은 세션입니다.' });
-          controller.close();
-          return;
-        }
+    if (!customerId) {
+      return NextResponse.json({ success: false, error: '광고주 고객 ID(customerId)가 필요합니다.' }, { status: 400 });
+    }
 
-        const { searchParams } = new URL(req.url);
-        const customerId = searchParams.get('customerId');
-        const datePreset = searchParams.get('datePreset') || 'yesterday';
-        const sinceParam = searchParams.get('since');
-        const untilParam = searchParams.get('until');
-        const targetUserId = searchParams.get('targetUserId');
-        const isManualForce = searchParams.get('isManualForce') === 'true';
+    let activeUserId = decoded.userId;
+    if (targetUserId && decoded.role === 'ADMIN') {
+      activeUserId = targetUserId;
+    }
 
-        if (!customerId) {
-          sendEvent({ error: '광고주 고객 ID(customerId)가 필요합니다.' });
-          controller.close();
-          return;
-        }
+    // 2. DB에서 유저의 네이버 API 키 정보 조회
+    const { data: user, error: userErr } = await supabase
+      .from('dashboard_users')
+      .select('naver_api_key, naver_secret_key, naver_customer_id')
+      .eq('id', activeUserId)
+      .single();
 
-        // 관리자가 다른 사용자의 정보를 대리 동기화하는지 확인
-        let activeUserId = decoded.userId;
-        if (targetUserId && decoded.role === 'ADMIN') {
-          activeUserId = targetUserId;
-        }
+    if (userErr || !user) {
+      return NextResponse.json({ success: false, error: '유저의 네이버 API 키 정보를 조회하지 못했습니다.' }, { status: 500 });
+    }
 
-        // 2. DB에서 유저의 네이버 API 키 정보 조회
-        sendEvent({ progress: 3, stage: 'API_KEYS', message: '네이버 API 연동 키를 확인하는 중...' });
-        const { data: user, error: userErr } = await supabase
-          .from('dashboard_users')
-          .select('naver_api_key, naver_secret_key, naver_customer_id')
-          .eq('id', activeUserId)
-          .single();
+    const apiKey = user.naver_api_key;
+    const secretKey = user.naver_secret_key;
+    const managerCustomerId = user.naver_customer_id;
 
-        if (userErr || !user) {
-          sendEvent({ error: '유저의 네이버 API 키 정보를 조회하지 못했습니다.' });
-          controller.close();
-          return;
-        }
+    // [특수 최적화 모드]: 통계 연산 없이 오직 신속하게 캠페인 목록만 조회
+    if (onlyCampaigns) {
+      const campData = await callNaverApi('/ncc/campaigns', apiKey, secretKey, managerCustomerId, 'GET', undefined, customerId);
+      const campaigns = Array.isArray(campData) ? campData : [];
+      return NextResponse.json({ success: true, campaigns });
+    }
 
-        const apiKey = user.naver_api_key;
-        const secretKey = user.naver_secret_key;
-        const managerCustomerId = user.naver_customer_id;
+    // 일반 스트리밍 흐름 가동
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        const sendEvent = (data: any) => {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+        };
 
-        // 3. KST 보정된 실질 날짜 조회 범위 도출
-        const { since, until } = getKstDateRange(datePreset, sinceParam, untilParam);
-        let dateList = getDatesInRange(since, until);
+        try {
+          sendEvent({ progress: 1, stage: 'AUTH', message: '세션 확인 및 동기화 시작...' });
 
-        if (!isManualForce) {
-          sendEvent({ progress: 6, stage: 'SMART_FILTER', message: `DB 누락 날짜 계산 중...` });
+          // 3. KST 보정된 실질 날짜 조회 범위 도출
+          const { since, until } = getKstDateRange(datePreset, sinceParam, untilParam);
+          let dateList = getDatesInRange(since, until);
+
+          if (!isManualForce) {
+            sendEvent({ progress: 6, stage: 'SMART_FILTER', message: `DB 누락 날짜 계산 중...` });
           const { data: existingDates } = await supabase
             .from('campaign_stats')
             .select('date')
@@ -268,8 +269,13 @@ export async function POST(req: NextRequest) {
         sendEvent({ progress: 8, stage: 'CAMPAIGNS', message: '네이버에서 캠페인 목록을 가져오는 중...' });
         let campaigns = [];
         try {
-          const campData = await callNaverApi('/ncc/campaigns', apiKey, secretKey, managerCustomerId, 'GET', undefined, customerId);
-          campaigns = Array.isArray(campData) ? campData : [];
+          if (campaignId) {
+            const campData = await callNaverApi(`/ncc/campaigns/${campaignId}`, apiKey, secretKey, managerCustomerId, 'GET', undefined, customerId);
+            campaigns = campData ? [campData] : [];
+          } else {
+            const campData = await callNaverApi('/ncc/campaigns', apiKey, secretKey, managerCustomerId, 'GET', undefined, customerId);
+            campaigns = Array.isArray(campData) ? campData : [];
+          }
         } catch (err: any) {
           console.error(`[Sync Campaigns API] 캠페인 목록 조회 실패: ${err.message}`);
           sendEvent({ error: `네이버 API에서 캠페인 목록을 조회하는 중 에러가 발생했습니다: ${err.message}` });

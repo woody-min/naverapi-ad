@@ -1912,51 +1912,131 @@ export default function Dashboard() {
       let errorOccurred = false;
       let errorMessage = '';
 
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        
-        let url = `/api/sync/campaigns?customerId=${customerId}&since=${chunk.since}&until=${chunk.until}&isManualForce=${isManualForce}`;
+      // ⚡ [캠페인 단위 분할 동기화] 1단계: 동기화 대상 캠페인 목록만 신속하게 사전 로드
+      setSyncMessage('동기화 대상 캠페인 목록을 조회하는 중...');
+      let campaignsToSync: any[] = [];
+      try {
+        let url = `/api/sync/campaigns?customerId=${customerId}&onlyCampaigns=true`;
         if (currentUser.role === 'ADMIN' && selectedUserFilter) {
           url += `&targetUserId=${selectedUserFilter}`;
         }
-
         const response = await fetch(url, { method: 'POST' });
-        if (!response.ok) {
-          throw new Error(`동기화 서버 연결에 실패했습니다. (HTTP ${response.status})`);
+        if (response.ok) {
+          const result = await response.json();
+          if (result.success && Array.isArray(result.campaigns)) {
+            campaignsToSync = result.campaigns;
+            console.log(`[Dashboard] 사전 수집된 캠페인 개수: ${campaignsToSync.length}개`);
+          }
         }
+      } catch (e) {
+        console.error('[Dashboard] 캠페인 목록 사전 조회 실패 (폴백 진행):', e);
+      }
 
-        const reader = response.body?.getReader();
-        const decoder = new TextDecoder();
-        if (!reader) throw new Error('스트리밍 리더를 설정할 수 없습니다.');
+      // ⚡ 2단계: 캠페인 목록이 있을 경우 [캠페인 x 날짜] 이중 분할 루프 작동
+      if (campaignsToSync.length > 0) {
+        const totalSteps = chunks.length * campaignsToSync.length;
+        let currentStep = 0;
 
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
 
-          const chunkText = decoder.decode(value, { stream: true });
-          const lines = chunkText.split('\n');
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(line.slice(6));
-                if (data.error) {
-                  errorOccurred = true;
-                  errorMessage = data.error;
-                  break;
-                }
-                if (data.progress !== undefined) {
-                  const baseProgress = (i / chunks.length) * 100;
-                  const chunkProgress = data.progress / chunks.length;
-                  setSyncProgress(Math.min(100, Math.round(baseProgress + chunkProgress)));
-                  setSyncStage(data.stage || '');
-                  setSyncMessage(`[${i+1}/${chunks.length} 구간: ${chunk.since}~${chunk.until}] ${data.message || ''}`);
-                }
-              } catch (e) {}
+          for (const camp of campaignsToSync) {
+            currentStep++;
+            const campName = camp.campaignName || camp.name || '캠페인';
+
+            let url = `/api/sync/campaigns?customerId=${customerId}&since=${chunk.since}&until=${chunk.until}&isManualForce=${isManualForce}&campaignId=${camp.nccCampaignId}`;
+            if (currentUser.role === 'ADMIN' && selectedUserFilter) {
+              url += `&targetUserId=${selectedUserFilter}`;
             }
+
+            const response = await fetch(url, { method: 'POST' });
+            if (!response.ok) {
+              throw new Error(`[${campName}] 동기화 서버 연결 실패 (HTTP ${response.status})`);
+            }
+
+            const reader = response.body?.getReader();
+            const decoder = new TextDecoder();
+            if (!reader) throw new Error('스트리밍 리더를 설정할 수 없습니다.');
+
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+
+              const chunkText = decoder.decode(value, { stream: true });
+              const lines = chunkText.split('\n');
+              for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                  try {
+                    const data = JSON.parse(line.slice(6));
+                    if (data.error) {
+                      errorOccurred = true;
+                      errorMessage = `[${campName}] ${data.error}`;
+                      break;
+                    }
+                    if (data.progress !== undefined) {
+                      const baseProgress = ((currentStep - 1) / totalSteps) * 100;
+                      const stepProgress = (data.progress / 100) * (100 / totalSteps);
+                      setSyncProgress(Math.min(100, Math.round(baseProgress + stepProgress)));
+                      setSyncStage(data.stage || '');
+                      setSyncMessage(`[${currentStep}/${totalSteps} 캠페인: ${campName}] ${data.message || ''}`);
+                    }
+                  } catch (e) {}
+                }
+              }
+              if (errorOccurred) break;
+            }
+            if (errorOccurred) break;
           }
           if (errorOccurred) break;
         }
-        if (errorOccurred) break;
+      } else {
+        // [폴백 흐름]: 캠페인 조회가 실패한 경우 기존 단일 날짜 청킹 루프 작동
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
+
+          let url = `/api/sync/campaigns?customerId=${customerId}&since=${chunk.since}&until=${chunk.until}&isManualForce=${isManualForce}`;
+          if (currentUser.role === 'ADMIN' && selectedUserFilter) {
+            url += `&targetUserId=${selectedUserFilter}`;
+          }
+
+          const response = await fetch(url, { method: 'POST' });
+          if (!response.ok) {
+            throw new Error(`동기화 서버 연결에 실패했습니다. (HTTP ${response.status})`);
+          }
+
+          const reader = response.body?.getReader();
+          const decoder = new TextDecoder();
+          if (!reader) throw new Error('스트리밍 리더를 설정할 수 없습니다.');
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            const chunkText = decoder.decode(value, { stream: true });
+            const lines = chunkText.split('\n');
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  if (data.error) {
+                    errorOccurred = true;
+                    errorMessage = data.error;
+                    break;
+                  }
+                  if (data.progress !== undefined) {
+                    const baseProgress = (i / chunks.length) * 100;
+                    const chunkProgress = data.progress / chunks.length;
+                    setSyncProgress(Math.min(100, Math.round(baseProgress + chunkProgress)));
+                    setSyncStage(data.stage || '');
+                    setSyncMessage(`[${i+1}/${chunks.length} 구간: ${chunk.since}~${chunk.until}] ${data.message || ''}`);
+                  }
+                } catch (e) {}
+              }
+            }
+            if (errorOccurred) break;
+          }
+          if (errorOccurred) break;
+        }
       }
 
       if (errorOccurred) {
