@@ -3519,9 +3519,7 @@ export default function Dashboard() {
                                     <td>
                                       <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                         <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{camp.campaign_type}</span>
-                                        <span className={`badge ${camp.campaign_status.toLowerCase()}`}>
-                                          {camp.campaign_status === 'ELIGIBLE' ? '노출가능' : '노출제한'}
-                                        </span>
+                                        {renderStatusBadge(camp.campaign_status)}
                                       </div>
                                     </td>
                                     <td>{formatNumber(camp.imp_cnt)}</td>
@@ -3600,9 +3598,7 @@ export default function Dashboard() {
                                                         </td>
                                                         <td style={{ padding: '10px', fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>{subg.adgroup_name}</td>
                                                         <td style={{ padding: '10px' }}>
-                                                          <span className={`badge ${subg.adgroup_status.toLowerCase()}`} style={{ fontSize: '0.65rem', padding: '2px 6px' }}>
-                                                            {subg.adgroup_status === 'ELIGIBLE' ? '노출가능' : '노출제한'}
-                                                          </span>
+                                                          {renderStatusBadge(subg.adgroup_status)}
                                                         </td>
                                                         <td style={{ padding: '10px', textAlign: 'right' }}>{formatNumber(subg.bid_amt || 0)}원</td>
                                                         <td style={{ padding: '10px', textAlign: 'right' }}>{formatNumber(subg.imp_cnt)}</td>
@@ -3745,9 +3741,7 @@ export default function Dashboard() {
                                   <td>
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                       <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{adg.adgroup_type}</span>
-                                      <span className={`badge ${adg.adgroup_status.toLowerCase()}`}>
-                                        {adg.adgroup_status === 'ELIGIBLE' ? '노출가능' : '노출제한'}
-                                      </span>
+                                      {renderStatusBadge(adg.adgroup_status)}
                                     </div>
                                   </td>
                                   <td>{formatNumber(adg.bid_amt || 0)}원</td>
