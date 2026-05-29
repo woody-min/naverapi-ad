@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/cron/sync-favorites",
-      "schedule": "55 6 * * *"
+      "schedule": "1 7 * * *"
     }
   ]
 }
